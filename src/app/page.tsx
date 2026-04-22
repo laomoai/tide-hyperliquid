@@ -159,6 +159,7 @@ export default function Home() {
   const [sidebarTab, setSidebarTab] = useState<'params' | 'orders'>('orders');
   const isResizingRef = useRef(false);
 
+  const [reduceOnlySells, setReduceOnlySells] = useState(true);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState<{status: 'success' | 'err', msg: string} | null>(null);
   const [paramNotice, setParamNotice] = useState<string | null>(null);
@@ -288,7 +289,8 @@ export default function Home() {
           const rawSz = parseFloat(m.sizeStr) || 0;
           const sz = Math.floor(rawSz / BTC_LOT) * BTC_LOT;
           const px = Math.round(m.price);
-          return { coin: 'BTC-PERP', is_buy: isBuy, sz, limit_px: px, order_type: { limit: { tif: 'Gtc' } }, reduce_only: false };
+          const reduce_only = !isBuy && reduceOnlySells;
+          return { coin: 'BTC-PERP', is_buy: isBuy, sz, limit_px: px, order_type: { limit: { tif: 'Gtc' } }, reduce_only };
         })
         .filter(o => o.sz >= BTC_LOT);
 
@@ -1052,9 +1054,14 @@ export default function Home() {
                           />
                           {belowMin && <span className="text-kline-down text-[9px] font-bold">{'<'}0.001</span>}
                         </div>
-                        <span className="text-yellow-500 flex items-center space-x-0.5">
-                          {Array.from({length: m.weight}).map((_,j) => <span key={j}>★</span>)}
-                        </span>
+                        <div className="flex items-center gap-1.5">
+                          {m.side === 'Sell' && reduceOnlySells && (
+                            <span className="text-[9px] font-bold border border-kline-down/50 text-kline-down rounded px-1 py-0.5 leading-none">R</span>
+                          )}
+                          <span className="text-yellow-500 flex items-center space-x-0.5">
+                            {Array.from({length: m.weight}).map((_,j) => <span key={j}>★</span>)}
+                          </span>
+                        </div>
                       </div>
                     </div>
                   );})}
@@ -1067,6 +1074,18 @@ export default function Home() {
               </div>
 
               <div className="p-4 border-t border-border-subtle bg-bg-card shadow-[0_-10px_20px_rgba(0,0,0,0.2)]">
+                 <label className="flex items-center justify-between mb-3 cursor-pointer select-none group">
+                   <div className="flex flex-col">
+                     <span className="text-xs font-medium text-text-main">卖单只减仓 (Reduce-Only)</span>
+                     <span className="text-[10px] text-text-muted font-mono mt-0.5">开启后卖单仅平多仓，不开空</span>
+                   </div>
+                   <div
+                     onClick={() => setReduceOnlySells(v => !v)}
+                     className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${reduceOnlySells ? 'bg-fib-a' : 'bg-border-subtle'}`}
+                   >
+                     <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${reduceOnlySells ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                   </div>
+                 </label>
                  <button
                    disabled={isDeploying || matrix.filter(m => m.active).length === 0 || matrix.some(m => m.active && (parseFloat(m.sizeStr) || 0) < 0.001)}
                    onClick={handleDeployOrders}
