@@ -173,9 +173,11 @@ export async function POST(req: NextRequest) {
 
     const action = { type: 'order', orders: orderWires, grouping: 'na' };
     const nonce = Date.now();
-    const signature = await signL1Action(wallet, action, masterAddress, nonce);
+    // Agent mode: sign with null vaultAddress. The on-chain agent authorization
+    // already links this agent key to the master account; no vaultAddress in payload.
+    const signature = await signL1Action(wallet, action, null, nonce);
 
-    const payload = { action, nonce, signature, vaultAddress: masterAddress };
+    const payload = { action, nonce, signature };
 
     const res = await fetch(HL_EXCHANGE_URL, {
       method: 'POST',
