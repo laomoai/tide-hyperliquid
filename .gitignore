@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Build outputs
+src/.next/
+src/.vercel/
+src/node_modules/
+
+# Logs
+*.log
+
+# Env
+src/.env
+src/.env.local
+src/.env.*.local

@@ -1,0 +1,6 @@
+{
+  "name": "BTC Fibonacci Analyzer",
+  "description": "Calculates and plots 89D and 4H Fibonacci retracements on a 1H candlestick chart using TradingView Lightweight Charts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

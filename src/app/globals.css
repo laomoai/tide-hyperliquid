@@ -1,0 +1,52 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-main: var(--bg-main);
+  --color-bg-card: var(--bg-card);
+  --color-border-subtle: var(--border-subtle);
+  --color-text-main: var(--text-main);
+  --color-text-muted: var(--text-muted);
+  
+  --color-fib-a: #02C076;
+  --color-fib-b: #F0B90B;
+  --color-kline-up: #02C076;
+  --color-kline-down: #CF304A;
+
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+  --font-mono: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+:root {
+  /* Light mode defaults */
+  --bg-main: #FAFAFA;
+  --bg-card: #FFFFFF;
+  --border-subtle: #EAECEF;
+  --text-main: #1E2329;
+  --text-muted: #707A8A;
+  color-scheme: light;
+}
+
+.dark {
+  --bg-main: #0B0E11;
+  --bg-card: #1E2329;
+  --border-subtle: #2B2F36;
+  --text-main: #EAECEF;
+  --text-muted: #848E9C;
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-main);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar {
+  width: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 10px;
+}
