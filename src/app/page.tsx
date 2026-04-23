@@ -176,7 +176,7 @@ export default function Home() {
   const paramNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 现有订单
-  type OpenOrder = { coin: string; side: string; limitPx: string; sz: string; oid: number; timestamp: number; origSz: string; };
+  type OpenOrder = { coin: string; side: string; limitPx: string; sz: string; oid: number; timestamp: number; origSz: string; orderType?: string; triggerPx?: string; };
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
   const [isFetchingOpenOrders, setIsFetchingOpenOrders] = useState(false);
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<number>>(new Set());
@@ -1274,7 +1274,12 @@ export default function Home() {
               {/* Header */}
               <div className="px-3 pt-3 pb-2 shrink-0 border-b border-border-subtle/50 flex items-center justify-between">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted flex items-center">
-                  <Check className="w-4 h-4 mr-2 text-fib-a"/> 现有挂单 (BTC-PERP)
+                  <Check className="w-4 h-4 mr-2 text-fib-a"/>
+                  现有挂单
+                  {openOrders.length > 0 && (() => {
+                    const coins = [...new Set(openOrders.map(o => o.coin))];
+                    return <span className="ml-1.5 font-mono normal-case text-[10px] opacity-70">({coins.join(' / ')})</span>;
+                  })()}
                 </h3>
                 <div className="flex items-center gap-2">
                   {selectedOrderIds.size > 0 && (
@@ -1316,44 +1321,68 @@ export default function Home() {
                     <br /><span className="text-[10px] opacity-60">点击刷新按钮获取最新数据</span>
                   </div>
                 )}
-                {openOrders.map(order => {
-                  const isBuy = order.side === 'B';
-                  const isSelected = selectedOrderIds.has(order.oid);
-                  const usdVal = (parseFloat(order.sz) * parseFloat(order.limitPx)).toFixed(0);
-                  return (
-                    <div
-                      key={order.oid}
-                      onClick={() => setSelectedOrderIds(prev => {
-                        const next = new Set(prev);
-                        isSelected ? next.delete(order.oid) : next.add(order.oid);
-                        return next;
-                      })}
-                      className={`p-2 rounded-md border transition-colors text-xs font-mono cursor-pointer ${isSelected ? 'bg-fib-a/10 border-fib-a/50' : 'bg-bg-card border-border-subtle hover:border-text-muted'}`}
-                    >
-                      <div className="flex justify-between items-center mb-1">
-                        <div className="flex items-center gap-2">
-                          <input type="checkbox" readOnly checked={isSelected}
-                            className="rounded border-border-subtle text-fib-a bg-bg-main w-3.5 h-3.5 pointer-events-none" />
-                          <span className="font-bold text-sm text-text-main">${parseFloat(order.limitPx).toFixed(1)}</span>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-widest ${isBuy ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
-                            {isBuy ? '买入' : '卖出'}
-                          </span>
-                          <button
-                            onClick={e => { e.stopPropagation(); handleCancelOrders([{ oid: order.oid, coin: order.coin }]); }}
-                            disabled={isCanceling}
-                            className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-kline-down/40 text-kline-down hover:bg-kline-down/10 transition-colors disabled:opacity-40"
-                          >取消</button>
+                {(() => {
+                  // 按 coin 分组
+                  const coins = [...new Set(openOrders.map(o => o.coin))];
+                  return coins.map(coin => {
+                    const coinOrders = openOrders.filter(o => o.coin === coin);
+                    return (
+                      <div key={coin}>
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-text-muted/60 mb-1.5 mt-1 px-0.5">{coin}-PERP</div>
+                        <div className="space-y-1.5">
+                          {coinOrders.map(order => {
+                            const isBuy = order.side === 'B';
+                            const isSelected = selectedOrderIds.has(order.oid);
+                            const isTrigger = order.orderType && order.orderType !== 'Limit';
+                            const usdVal = isTrigger ? null : (parseFloat(order.sz) * parseFloat(order.limitPx)).toFixed(0);
+                            return (
+                              <div
+                                key={order.oid}
+                                onClick={() => setSelectedOrderIds(prev => {
+                                  const next = new Set(prev);
+                                  isSelected ? next.delete(order.oid) : next.add(order.oid);
+                                  return next;
+                                })}
+                                className={`p-2 rounded-md border transition-colors text-xs font-mono cursor-pointer ${isSelected ? 'bg-fib-a/10 border-fib-a/50' : 'bg-bg-card border-border-subtle hover:border-text-muted'}`}
+                              >
+                                <div className="flex justify-between items-center mb-1">
+                                  <div className="flex items-center gap-2">
+                                    <input type="checkbox" readOnly checked={isSelected}
+                                      className="rounded border-border-subtle text-fib-a bg-bg-main w-3.5 h-3.5 pointer-events-none" />
+                                    {isTrigger ? (
+                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-text-muted/10 text-text-muted border border-text-muted/20">
+                                        {order.orderType}
+                                      </span>
+                                    ) : (
+                                      <span className="font-bold text-sm text-text-main">${parseFloat(order.limitPx).toFixed(1)}</span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-widest ${isBuy ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
+                                      {isBuy ? '买入' : '卖出'}
+                                    </span>
+                                    <button
+                                      onClick={e => { e.stopPropagation(); handleCancelOrders([{ oid: order.oid, coin: order.coin }]); }}
+                                      disabled={isCanceling}
+                                      className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-kline-down/40 text-kline-down hover:bg-kline-down/10 transition-colors disabled:opacity-40"
+                                    >取消</button>
+                                  </div>
+                                </div>
+                                <div className="flex justify-between items-center text-text-muted">
+                                  <span>
+                                    {order.sz} {order.coin}
+                                    {usdVal && <span className="text-[9px]"> ≈${usdVal}</span>}
+                                  </span>
+                                  <span className="text-[9px] opacity-60">{new Date(order.timestamp).toLocaleTimeString('zh-CN')}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                      <div className="flex justify-between items-center text-text-muted">
-                        <span>{order.sz} {order.coin} <span className="text-[9px]">≈${usdVal}</span></span>
-                        <span className="text-[9px] opacity-60">{new Date(order.timestamp).toLocaleTimeString('zh-CN')}</span>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  });
+                })()}
               </div>
 
               {cancelResult && (
