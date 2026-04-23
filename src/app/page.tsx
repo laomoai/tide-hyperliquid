@@ -155,15 +155,25 @@ export default function Home() {
   const [accountValue, setAccountValue] = useState<number>(0);
   const [manualOrderOverrides, setManualOrderOverrides] = useState<Record<string, { active?: boolean; sizeStr?: string; isManual?: boolean }>>({});
 
-  const [sidebarWidth, setSidebarWidth] = useState(420);
-  const [sidebarTab, setSidebarTab] = useState<'params' | 'orders'>('orders');
+  const [sidebarWidth, setSidebarWidth] = useState(580);
+  const [sidebarTab, setSidebarTab] = useState<'orders' | 'openOrders' | 'params'>('orders');
+  const [sidebarZoom, setSidebarZoom] = useState(1.0);
   const isResizingRef = useRef(false);
+  const hasMountedRef = useRef(false);
 
   const [reduceOnlySells, setReduceOnlySells] = useState(true);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState<{status: 'success' | 'err', msg: string} | null>(null);
   const [paramNotice, setParamNotice] = useState<string | null>(null);
   const paramNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 现有订单
+  type OpenOrder = { coin: string; side: string; limitPx: string; sz: string; oid: number; timestamp: number; origSz: string; };
+  const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
+  const [isFetchingOpenOrders, setIsFetchingOpenOrders] = useState(false);
+  const [selectedOrderIds, setSelectedOrderIds] = useState<Set<number>>(new Set());
+  const [isCanceling, setIsCanceling] = useState(false);
+  const [cancelResult, setCancelResult] = useState<{status: 'success' | 'err', msg: string} | null>(null);
 
   const orderKey = (price: number) => price.toFixed(8);
 
@@ -333,6 +343,80 @@ export default function Home() {
       setTimeout(() => setDeployResult(null), 5000); // clear after 5s
     }
   };
+
+  const fetchOpenOrders = async () => {
+    const addr = typeof window !== 'undefined' ? localStorage.getItem('hlAddress') : null;
+    if (!addr) return;
+    setIsFetchingOpenOrders(true);
+    setCancelResult(null);
+    try {
+      const res = await fetch('https://api.hyperliquid.xyz/info', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'openOrders', user: addr }),
+      });
+      const data = await res.json();
+      setOpenOrders(Array.isArray(data) ? data : []);
+      setSelectedOrderIds(new Set());
+    } catch {
+      setOpenOrders([]);
+    } finally {
+      setIsFetchingOpenOrders(false);
+    }
+  };
+
+  const handleCancelOrders = async (oids: number[]) => {
+    const pk = typeof window !== 'undefined' ? localStorage.getItem('hlPrivateKey') : null;
+    if (!pk) { setCancelResult({ status: 'err', msg: '缺少私钥' }); return; }
+    setIsCanceling(true);
+    setCancelResult(null);
+    try {
+      const res = await fetch('/api/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ privateKey: pk, orderIds: oids }),
+      });
+      const data = await res.json();
+      if (data?.status === 'ok' || data?.response?.type === 'cancel') {
+        setCancelResult({ status: 'success', msg: `已取消 ${oids.length} 个订单` });
+        await fetchOpenOrders();
+      } else {
+        setCancelResult({ status: 'err', msg: data?.msg || JSON.stringify(data) });
+      }
+    } catch (e: any) {
+      setCancelResult({ status: 'err', msg: e.message });
+    } finally {
+      setIsCanceling(false);
+      setTimeout(() => setCancelResult(null), 5000);
+    }
+  };
+
+  // 从 localStorage 加载（mount 时）；persist effects 在 mount 第一次 render 时跳过，避免覆盖存储值
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const sl = localStorage.getItem('leverage');
+    if (sl) setLeverage(parseInt(sl, 10) || 10);
+    const sc = localStorage.getItem('totalCapital');
+    if (sc) setTotalCapital(parseInt(sc, 10) || 1000);
+    const sz = localStorage.getItem('sidebarZoom');
+    if (sz) setSidebarZoom(parseFloat(sz) || 1.0);
+    hasMountedRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!hasMountedRef.current) return;
+    localStorage.setItem('leverage', String(leverage));
+  }, [leverage]);
+
+  useEffect(() => {
+    if (!hasMountedRef.current) return;
+    localStorage.setItem('totalCapital', String(totalCapital));
+  }, [totalCapital]);
+
+  useEffect(() => {
+    if (!hasMountedRef.current) return;
+    localStorage.setItem('sidebarZoom', String(sidebarZoom));
+  }, [sidebarZoom]);
 
   // Fetch HL master spot balance and BTC-PERP position
   useEffect(() => {
@@ -799,7 +883,7 @@ export default function Home() {
             const handleMouseMove = (moveEvent: MouseEvent) => {
               if (!isResizingRef.current) return;
               const newWidth = document.body.clientWidth - moveEvent.clientX;
-              if (newWidth >= 360 && newWidth <= 900) {
+              if (newWidth >= 480 && newWidth <= 1100) {
                 setSidebarWidth(newWidth);
               }
             };
@@ -819,22 +903,33 @@ export default function Home() {
           style={{ width: `${sidebarWidth}px` }}
           className="shrink-0 bg-bg-card border-l border-border-subtle flex flex-col z-20 transition-colors duration-200 overflow-hidden"
         >
+          {/* zoom wrapper - applies to all inner content */}
+          <div style={{ zoom: sidebarZoom }} className="flex flex-col flex-1 min-h-0">
           {/* Tab Bar */}
           <div className="shrink-0 flex border-b border-border-subtle bg-bg-card">
             <button
-              onClick={() => setSidebarTab('params')}
-              className={`flex-1 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'params' ? 'text-fib-a border-b-2 border-fib-a' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
+              onClick={() => { setSidebarTab('orders'); }}
+              className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'orders' ? 'text-yellow-500 border-b-2 border-yellow-500' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
             >
-              <BarChart className="w-3.5 h-3.5" /> 参数与状态
+              <Zap className="w-4 h-4 fill-current" /> 部署订单
+              {matrix.filter(m => m.active).length > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 rounded-full bg-yellow-500/20 text-yellow-500 text-xs font-bold">{matrix.filter(m => m.active).length}</span>
+              )}
             </button>
             <button
-              onClick={() => setSidebarTab('orders')}
-              className={`flex-1 py-2.5 text-xs font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'orders' ? 'text-yellow-500 border-b-2 border-yellow-500' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
+              onClick={() => { setSidebarTab('openOrders'); fetchOpenOrders(); }}
+              className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'openOrders' ? 'text-fib-a border-b-2 border-fib-a' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
             >
-              <Zap className="w-3.5 h-3.5 fill-current" /> 订单矩阵
-              {matrix.filter(m => m.active).length > 0 && (
-                <span className="ml-1 px-1.5 py-0.5 rounded-full bg-yellow-500/20 text-yellow-500 text-[9px] font-bold">{matrix.filter(m => m.active).length}</span>
+              <Check className="w-4 h-4" /> 现有订单
+              {openOrders.length > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 rounded-full bg-fib-a/20 text-fib-a text-xs font-bold">{openOrders.length}</span>
               )}
+            </button>
+            <button
+              onClick={() => setSidebarTab('params')}
+              className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'params' ? 'text-fib-a border-b-2 border-fib-a' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
+            >
+              <BarChart className="w-4 h-4" /> 参数
             </button>
           </div>
 
@@ -843,23 +938,21 @@ export default function Home() {
             <div className="flex-1 overflow-y-auto custom-scrollbar">
               {/* Module A: Status */}
               <div className="p-4 border-b border-border-subtle">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted mb-4 flex items-center"><Wallet className="w-4 h-4 mr-2"/> 全局状态 (HL BTC-PERP)</h3>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-text-muted mb-4 flex items-center"><Wallet className="w-4 h-4 mr-2"/> 全局状态 (HL BTC-PERP)</h3>
                 {!hlPosition && hlPosition !== 'empty' ? (
                   <div className="text-sm text-text-muted font-mono animate-pulse">正在连接 HyperLiquid...</div>
                 ) : hlPosition === 'empty' ? (
-                  <div className="text-sm text-text-main font-mono p-3 bg-bg-main rounded border border-border-subtle">
-                    无可用持仓
-                  </div>
+                  <div className="text-sm text-text-main font-mono p-3 bg-bg-main rounded border border-border-subtle">无可用持仓</div>
                 ) : (
                   <div className="space-y-2 p-3 bg-bg-main rounded border border-border-subtle">
                     <div className="flex justify-between items-center">
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${parseFloat(hlPosition.szi) > 0 ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
+                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${parseFloat(hlPosition.szi) > 0 ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
                         {parseFloat(hlPosition.szi) > 0 ? '做多' : '做空'}
                       </span>
-                      <span className="font-mono font-bold">{Math.abs(parseFloat(hlPosition.szi))} BTC</span>
+                      <span className="font-mono font-bold text-base">{Math.abs(parseFloat(hlPosition.szi))} BTC</span>
                     </div>
                     <div className="flex justify-between items-center text-sm font-mono pt-2 border-t border-border-subtle/50">
-                      <span className="text-text-muted text-[11px]">未实现盈亏:</span>
+                      <span className="text-text-muted">未实现盈亏:</span>
                       <span className={parseFloat(hlPosition.unrealizedPnl) >= 0 ? 'text-kline-up' : 'text-kline-down'}>
                         {parseFloat(hlPosition.unrealizedPnl) > 0 ? '+' : ''}{parseFloat(hlPosition.unrealizedPnl).toFixed(2)} USDT
                       </span>
@@ -867,18 +960,18 @@ export default function Home() {
                   </div>
                 )}
                 {!hlPosition && (
-                   <p className="text-[10px] text-text-muted mt-2">请先在右上角设置中配置 API 以获取链上状态。</p>
+                   <p className="text-xs text-text-muted mt-2">请先在右上角设置中配置 API 以获取链上状态。</p>
                 )}
               </div>
 
               {/* Module B: Config */}
               <div className="p-4">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted mb-4 flex items-center"><BarChart className="w-4 h-4 mr-2"/> 共振参数设置</h3>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-text-muted mb-4 flex items-center"><BarChart className="w-4 h-4 mr-2"/> 共振参数设置</h3>
                 <div className="space-y-4">
                   <div className="flex flex-col space-y-1">
-                    <div className="flex justify-between text-[11px] text-text-muted">
+                    <div className="flex justify-between text-sm text-text-muted">
                       <span>杠杆倍数 (Leverage)</span>
-                      <span>Master USDC: <span className={accountValue > 0 ? "text-fib-a font-bold" : ""}>{accountValue > 0 ? `$${accountValue.toFixed(2)}` : '未连接/0'}</span></span>
+                      <span>余额: <span className={accountValue > 0 ? "text-fib-a font-bold" : ""}>{accountValue > 0 ? `$${accountValue.toFixed(2)}` : '未连接/0'}</span></span>
                     </div>
                     <div className="flex space-x-2">
                       <div className="relative w-20 shrink-0">
@@ -886,7 +979,7 @@ export default function Home() {
                           type="number" min="1" max="150"
                           value={leverage || ''}
                           onChange={e => setLeverage(Number(e.target.value) || 1)}
-                          className="w-full bg-bg-main border border-border-subtle text-text-main font-mono text-sm px-2 py-1.5 rounded focus:border-fib-a focus:outline-none"
+                          className="w-full bg-bg-main border border-border-subtle text-text-main font-mono text-base px-2 py-1.5 rounded focus:border-fib-a focus:outline-none"
                         />
                         <span className="absolute right-2 top-1.5 text-text-muted text-xs font-mono">x</span>
                       </div>
@@ -907,59 +1000,47 @@ export default function Home() {
                       </button>
                     </div>
                     {paramNotice && (
-                      <div className="mt-2 px-2 py-1.5 rounded bg-kline-down/10 border border-kline-down/30 text-kline-down text-[10px] font-mono flex items-start gap-1.5">
-                        <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                      <div className="mt-2 px-2 py-1.5 rounded bg-kline-down/10 border border-kline-down/30 text-kline-down text-xs font-mono flex items-start gap-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                         {paramNotice}
                       </div>
                     )}
                   </div>
 
                   <div>
-                     <label className="text-[11px] text-text-muted block mb-1">网格策略总规模 (USDT, 持仓名义价值)</label>
+                     <label className="text-sm text-text-muted block mb-1">网格策略总规模 (USDT, 持仓名义价值)</label>
                      <input
                        type="number"
                        value={totalCapital || ''}
                        onChange={handleCapitalChange}
-                       className="w-full bg-bg-main border border-border-subtle text-text-main font-mono text-sm px-2 py-1.5 rounded focus:border-fib-a focus:outline-none"
+                       className="w-full bg-bg-main border border-border-subtle text-text-main font-mono text-base px-2 py-1.5 rounded focus:border-fib-a focus:outline-none"
                      />
-                     <div className="text-[10px] text-text-muted mt-1.5 flex justify-between px-1">
+                     <div className="text-xs text-text-muted mt-1.5 flex justify-between px-1">
                        <span className="opacity-70">分配规模 = 各挂单的法币总和</span>
-                       <span>约耗保证金: <span className="text-text-main font-mono">${(totalCapital / (leverage || 1)).toFixed(2)}</span></span>
+                       <span>保证金: <span className="text-text-main font-mono">${(totalCapital / (leverage || 1)).toFixed(2)}</span></span>
                      </div>
                   </div>
 
-                  <div className="pt-2">
-                     <label className="text-[11px] text-text-muted block mb-1 flex justify-between">
+                  <div className="pt-1">
+                     <label className="text-sm text-text-muted block mb-1 flex justify-between">
                         <span>合并容差阈值 (%)</span>
                         <span className="font-mono text-fib-a">{tolerance}%</span>
                      </label>
-                     <input
-                       type="range"
-                       min="0.1" max="2.0" step="0.1"
-                       value={tolerance}
-                       onChange={e => setTolerance(Number(e.target.value))}
-                       className="w-full accent-fib-a"
-                     />
+                     <input type="range" min="0.1" max="2.0" step="0.1" value={tolerance}
+                       onChange={e => setTolerance(Number(e.target.value))} className="w-full accent-fib-a" />
                   </div>
 
                   <div className="pt-1">
-                     <label className="text-[11px] text-text-muted block mb-1 flex justify-between">
-                        <span>远端网格数量递增 (马丁格尔乘数)</span>
+                     <label className="text-sm text-text-muted block mb-1 flex justify-between">
+                        <span>远端网格递增 (马丁格尔)</span>
                         <span className="font-mono text-fib-a">+{depthScale * 100}%/层</span>
                      </label>
-                     <input
-                       type="range"
-                       min="0" max="2.0" step="0.1"
-                       value={depthScale}
-                       onChange={e => setDepthScale(Number(e.target.value))}
-                       className="w-full accent-fib-a"
-                     />
-                     <p className="text-[10px] text-text-muted mt-1 opacity-70">
-                       0%表示纯按星级分配数量。＞0表示离现价越远的网格，挂单数量翻倍越多(用于抗浮亏)。
-                     </p>
+                     <input type="range" min="0" max="2.0" step="0.1" value={depthScale}
+                       onChange={e => setDepthScale(Number(e.target.value))} className="w-full accent-fib-a" />
+                     <p className="text-xs text-text-muted mt-1 opacity-70">0%=纯星级分配；＞0=远端挂单更多(抗浮亏)</p>
                   </div>
-                  <div className="flex justify-between text-[11px] text-text-muted font-mono pt-1">
-                     <span>权重设置: 1D(2) 4H(1)</span>
+                  <div className="flex justify-between text-xs text-text-muted font-mono pt-1">
+                     <span>权重: 1D(2) 4H(1)</span>
                      <span>现价: ${currentPrice.toFixed(0)}</span>
                   </div>
                 </div>
@@ -967,27 +1048,43 @@ export default function Home() {
 
               {/* Weight Rules */}
               <div className="p-4 border-t border-border-subtle">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted mb-3">星级权重规则</h3>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-text-muted mb-3">星级权重规则</h3>
                 <div className="space-y-2">
                   {[
-                    { stars: 1, label: '仅 4H 斐波那契位', desc: '4H 单独出现' },
-                    { stars: 2, label: '仅 1D 斐波那契位', desc: '1D 单独出现' },
-                    { stars: 3, label: '1D + 4H 共振', desc: '两者在容差内重叠' },
-                    { stars: 4, label: '2×1D + 4H', desc: '两条日线 + 一条4H' },
-                    { stars: 5, label: '2×1D + 4H 强共振', desc: '更高叠加层数' },
+                    { stars: 1, label: '仅 4H 斐波那契位', desc: '4H 单独' },
+                    { stars: 2, label: '仅 1D 斐波那契位', desc: '1D 单独' },
+                    { stars: 3, label: '1D + 4H 共振', desc: '容差内重叠' },
+                    { stars: 4, label: '2×1D + 4H', desc: '日线+4H' },
+                    { stars: 5, label: '2×1D + 4H 强共振', desc: '高叠加' },
                   ].map(({ stars, label, desc }) => (
-                    <div key={stars} className="flex items-center justify-between text-[11px] font-mono">
+                    <div key={stars} className="flex items-center justify-between text-sm font-mono">
                       <div className="flex items-center gap-2">
                         <span className="text-yellow-500 tracking-tighter">{'★'.repeat(stars)}{'☆'.repeat(Math.max(0, 3 - stars))}</span>
                         <span className="text-text-main">{label}</span>
                       </div>
-                      <span className="text-text-muted text-[10px]">{desc}</span>
+                      <span className="text-text-muted text-xs">{desc}</span>
                     </div>
                   ))}
                 </div>
-                <p className="text-[10px] text-text-muted mt-3 opacity-70 leading-relaxed">
-                  星级越高代表斐波那契共振越强，系统会按星级比例分配更多仓位。马丁格尔乘数在星级基础上额外叠加远端权重。
+                <p className="text-xs text-text-muted mt-3 opacity-70 leading-relaxed">
+                  星级越高代表斐波那契共振越强，按星级比例分配仓位。
                 </p>
+
+                {/* 字号调节 */}
+                <div className="mt-4 pt-4 border-t border-border-subtle">
+                  <label className="text-sm text-text-muted block mb-1 flex justify-between">
+                    <span>界面字号缩放</span>
+                    <span className="font-mono text-fib-a">{Math.round(sidebarZoom * 100)}%</span>
+                  </label>
+                  <input type="range" min="0.7" max="2.0" step="0.05"
+                    value={sidebarZoom}
+                    onChange={e => setSidebarZoom(parseFloat(e.target.value))}
+                    className="w-full accent-fib-a"
+                  />
+                  <div className="flex justify-between text-xs text-text-muted mt-0.5 px-0.5">
+                    <span>70%</span><span>100%</span><span>150%</span><span>200%</span>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -1000,7 +1097,7 @@ export default function Home() {
                 <div className="px-3 pt-3 pb-2 shrink-0 z-10 bg-bg-main border-b border-border-subtle/50">
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted flex items-center">
-                      <Zap className="w-4 h-4 mr-2 text-yellow-500 fill-current"/> 订单矩阵 (草稿)
+                      <Zap className="w-4 h-4 mr-2 text-yellow-500 fill-current"/> 部署订单 (草稿)
                     </h3>
                   </div>
                   {matrix.length > 0 && (
@@ -1014,13 +1111,9 @@ export default function Home() {
                         { label: '★★',     fn: () => selectWhere(m => m.weight === 2),   color: 'text-yellow-500' },
                         { label: '★★★',    fn: () => selectWhere(m => m.weight >= 3),    color: 'text-yellow-500' },
                       ] as { label: string; fn: () => void; color?: string }[]).map(({ label, fn, color }) => (
-                        <button
-                          key={label}
-                          onClick={fn}
-                          className={`text-[10px] font-mono border border-border-subtle hover:border-text-muted rounded px-1.5 py-0.5 transition-colors ${color ?? 'text-text-muted hover:text-text-main'}`}
-                        >
-                          {label}
-                        </button>
+                        <button key={label} onClick={fn}
+                          className={`text-xs font-mono border border-border-subtle hover:border-text-muted rounded px-1.5 py-0.5 transition-colors ${color ?? 'text-text-muted hover:text-text-main'}`}
+                        >{label}</button>
                       ))}
                     </div>
                   )}
@@ -1033,42 +1126,34 @@ export default function Home() {
                     <div key={i} className={`p-2 rounded-md border transition-colors text-xs font-mono group ${belowMin ? 'bg-kline-down/5 border-kline-down/40' : m.active ? 'bg-bg-card border-border-subtle hover:border-text-muted' : 'bg-bg-main border-border-subtle/30 opacity-50'}`}>
                       <div className="flex justify-between items-center mb-1">
                         <label className="flex items-center space-x-2 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={m.active}
-                            onChange={() => toggleOrderActive(i)}
-                            className="rounded border-border-subtle text-fib-a focus:ring-fib-a bg-bg-main w-3.5 h-3.5"
-                          />
-                          <span className={`font-bold ${m.active ? 'text-text-main' : 'text-text-muted line-through'}`}>${m.price.toFixed(1)}</span>
+                          <input type="checkbox" checked={m.active} onChange={() => toggleOrderActive(i)}
+                            className="rounded border-border-subtle text-fib-a focus:ring-fib-a bg-bg-main w-3.5 h-3.5" />
+                          <span className={`font-bold text-sm ${m.active ? 'text-text-main' : 'text-text-muted line-through'}`}>${m.price.toFixed(1)}</span>
                         </label>
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-widest ${m.side === 'Buy' ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>{m.side === 'Buy' ? '买入' : '卖出'}</span>
                       </div>
                       <div className={`flex justify-between items-center transition-opacity ${m.active ? 'opacity-80 group-hover:opacity-100' : 'opacity-40 pointer-events-none'}`}>
                         <div className="flex items-center gap-1.5">
-                          <span className="text-text-muted mr-1">数量(BTC):</span>
-                          <input
-                            type="text"
-                            value={m.sizeStr}
-                            onChange={(e) => handleOrderSizeChange(i, e.target.value)}
-                            className={`bg-bg-main border rounded px-1 py-0.5 w-16 outline-none text-xs font-mono ${belowMin ? 'border-kline-down text-kline-down focus:border-kline-down' : 'border-border-subtle text-text-main focus:border-fib-a'}`}
-                          />
-                          {belowMin && <span className="text-kline-down text-[9px] font-bold">{'<'}0.001</span>}
+                          <span className="text-text-muted">数量:</span>
+                          <input type="text" value={m.sizeStr} onChange={(e) => handleOrderSizeChange(i, e.target.value)}
+                            className={`bg-bg-main border rounded px-1 py-0.5 w-16 outline-none text-xs font-mono ${belowMin ? 'border-kline-down text-kline-down focus:border-kline-down' : 'border-border-subtle text-text-main focus:border-fib-a'}`} />
+                          {belowMin ? (
+                            <span className="text-kline-down text-[9px] font-bold">{'<'}0.001</span>
+                          ) : szVal > 0 ? (
+                            <span className="text-text-muted text-[9px] font-mono">≈${(szVal * m.price).toFixed(0)}</span>
+                          ) : null}
                         </div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1">
                           {m.side === 'Sell' && reduceOnlySells && (
                             <span className="text-[9px] font-bold border border-kline-down/50 text-kline-down rounded px-1 py-0.5 leading-none">R</span>
                           )}
-                          <span className="text-yellow-500 flex items-center space-x-0.5">
-                            {Array.from({length: m.weight}).map((_,j) => <span key={j}>★</span>)}
-                          </span>
+                          <span className="text-yellow-500">{'★'.repeat(m.weight)}</span>
                         </div>
                       </div>
                     </div>
                   );})}
                   {matrix.length === 0 && (
-                    <div className="text-text-muted text-xs text-center py-6 font-mono">
-                      正在计算订单矩阵...
-                    </div>
+                    <div className="text-text-muted text-xs text-center py-6 font-mono">正在计算订单矩阵...</div>
                   )}
                 </div>
               </div>
@@ -1079,10 +1164,8 @@ export default function Home() {
                      <span className="text-xs font-medium text-text-main">卖单只减仓 (Reduce-Only)</span>
                      <span className="text-[10px] text-text-muted font-mono mt-0.5">开启后卖单仅平多仓，不开空</span>
                    </div>
-                   <div
-                     onClick={() => setReduceOnlySells(v => !v)}
-                     className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${reduceOnlySells ? 'bg-fib-a' : 'bg-border-subtle'}`}
-                   >
+                   <div onClick={() => setReduceOnlySells(v => !v)}
+                     className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${reduceOnlySells ? 'bg-fib-a' : 'bg-border-subtle'}`}>
                      <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${reduceOnlySells ? 'translate-x-4' : 'translate-x-0.5'}`} />
                    </div>
                  </label>
@@ -1095,23 +1178,115 @@ export default function Home() {
                     {isDeploying ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Zap className="w-4 h-4 mr-2 fill-current"/>}
                     {isDeploying ? '正在计算 L1 签名并部署...' : '⚡ 一键部署限价单'}
                  </button>
-
                  {deployResult && (
                    <div className={`mt-3 p-2 rounded text-xs flex items-center font-mono ${deployResult.status === 'success' ? 'bg-kline-up/10 text-kline-up border border-kline-up/20' : 'bg-kline-down/10 text-kline-down border border-kline-down/20'}`}>
-                     <AlertCircle className="w-3 h-3 mr-1.5 shrink-0" />
-                     {deployResult.msg}
+                     <AlertCircle className="w-3 h-3 mr-1.5 shrink-0" />{deployResult.msg}
                    </div>
                  )}
-
                  {!deployResult && (
-                   <p className="text-[10px] text-text-muted text-center mt-2 font-mono">
-                     私钥仅发送到本机 API 路由用于 HyperLiquid SDK 签名
-                   </p>
+                   <p className="text-[10px] text-text-muted text-center mt-2 font-mono">私钥仅发送到本机 API 路由用于 HyperLiquid SDK 签名</p>
                  )}
               </div>
             </>
           )}
 
+          {/* Tab: 现有订单 */}
+          {sidebarTab === 'openOrders' && (
+            <div className="flex-1 flex flex-col overflow-hidden bg-bg-main">
+              {/* Header */}
+              <div className="px-3 pt-3 pb-2 shrink-0 border-b border-border-subtle/50 flex items-center justify-between">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted flex items-center">
+                  <Check className="w-4 h-4 mr-2 text-fib-a"/> 现有挂单 (BTC-PERP)
+                </h3>
+                <div className="flex items-center gap-2">
+                  {selectedOrderIds.size > 0 && (
+                    <button
+                      onClick={() => handleCancelOrders(Array.from(selectedOrderIds))}
+                      disabled={isCanceling}
+                      className="text-xs font-bold px-2 py-1 rounded bg-kline-down/20 text-kline-down border border-kline-down/40 hover:bg-kline-down/30 transition-colors disabled:opacity-50"
+                    >
+                      {isCanceling ? '取消中...' : `取消选中 (${selectedOrderIds.size})`}
+                    </button>
+                  )}
+                  {openOrders.length > 0 && (
+                    <button
+                      onClick={() => handleCancelOrders(openOrders.map(o => o.oid))}
+                      disabled={isCanceling}
+                      className="text-xs font-bold px-2 py-1 rounded bg-kline-down/10 text-kline-down border border-kline-down/30 hover:bg-kline-down/20 transition-colors disabled:opacity-50"
+                    >
+                      {isCanceling ? '...' : '全部取消'}
+                    </button>
+                  )}
+                  <button
+                    onClick={fetchOpenOrders}
+                    disabled={isFetchingOpenOrders}
+                    className="text-xs font-mono border border-border-subtle hover:border-text-muted text-text-muted hover:text-text-main rounded px-2 py-1 transition-colors disabled:opacity-50"
+                  >
+                    {isFetchingOpenOrders ? '刷新中...' : '↻ 刷新'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Order list */}
+              <div className="flex-1 overflow-y-auto p-3 custom-scrollbar space-y-2">
+                {isFetchingOpenOrders && openOrders.length === 0 && (
+                  <div className="text-text-muted text-xs text-center py-6 font-mono animate-pulse">加载中...</div>
+                )}
+                {!isFetchingOpenOrders && openOrders.length === 0 && (
+                  <div className="text-text-muted text-xs text-center py-6 font-mono">
+                    暂无挂单
+                    <br /><span className="text-[10px] opacity-60">点击刷新按钮获取最新数据</span>
+                  </div>
+                )}
+                {openOrders.map(order => {
+                  const isBuy = order.side === 'B';
+                  const isSelected = selectedOrderIds.has(order.oid);
+                  const usdVal = (parseFloat(order.sz) * parseFloat(order.limitPx)).toFixed(0);
+                  return (
+                    <div
+                      key={order.oid}
+                      onClick={() => setSelectedOrderIds(prev => {
+                        const next = new Set(prev);
+                        isSelected ? next.delete(order.oid) : next.add(order.oid);
+                        return next;
+                      })}
+                      className={`p-2 rounded-md border transition-colors text-xs font-mono cursor-pointer ${isSelected ? 'bg-fib-a/10 border-fib-a/50' : 'bg-bg-card border-border-subtle hover:border-text-muted'}`}
+                    >
+                      <div className="flex justify-between items-center mb-1">
+                        <div className="flex items-center gap-2">
+                          <input type="checkbox" readOnly checked={isSelected}
+                            className="rounded border-border-subtle text-fib-a bg-bg-main w-3.5 h-3.5 pointer-events-none" />
+                          <span className="font-bold text-sm text-text-main">${parseFloat(order.limitPx).toFixed(1)}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-widest ${isBuy ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
+                            {isBuy ? '买入' : '卖出'}
+                          </span>
+                          <button
+                            onClick={e => { e.stopPropagation(); handleCancelOrders([order.oid]); }}
+                            disabled={isCanceling}
+                            className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-kline-down/40 text-kline-down hover:bg-kline-down/10 transition-colors disabled:opacity-40"
+                          >取消</button>
+                        </div>
+                      </div>
+                      <div className="flex justify-between items-center text-text-muted">
+                        <span>{order.sz} BTC <span className="text-[9px]">≈${usdVal}</span></span>
+                        <span className="text-[9px] opacity-60">{new Date(order.timestamp).toLocaleTimeString('zh-CN')}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {cancelResult && (
+                <div className={`mx-3 mb-3 p-2 rounded text-xs flex items-center font-mono ${cancelResult.status === 'success' ? 'bg-kline-up/10 text-kline-up border border-kline-up/20' : 'bg-kline-down/10 text-kline-down border border-kline-down/20'}`}>
+                  <AlertCircle className="w-3 h-3 mr-1.5 shrink-0" />{cancelResult.msg}
+                </div>
+              )}
+            </div>
+          )}
+
+          </div>{/* end zoom wrapper */}
         </aside>
       </div>
     </div>
