@@ -8,8 +8,9 @@ const MAX_BULK_ORDERS = 50;
 const HL_INFO_URL = 'https://api.hyperliquid.xyz/info';
 const HL_EXCHANGE_URL = 'https://api.hyperliquid.xyz/exchange';
 
-// BTC is universally index 0 in HyperLiquid's universe (first listed asset)
-const BTC_ASSET_INDEX = 0;
+// Fallback asset index (BTC is universally index 0 in HyperLiquid's universe)
+const DEFAULT_ASSET_INDEX = 0;
+const DEFAULT_SZ_DECIMALS = 3;
 
 // EIP-712 constants (from HyperLiquid protocol)
 const HL_DOMAIN = {
@@ -128,7 +129,9 @@ async function getUserRole(address: string): Promise<string> {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { privateKey, masterAddress, orders } = body;
+    const { privateKey, masterAddress, orders, assetIndex, szDecimals } = body;
+    const resolvedAssetIndex = typeof assetIndex === 'number' ? assetIndex : DEFAULT_ASSET_INDEX;
+    const resolvedSzDecimals = typeof szDecimals === 'number' ? szDecimals : DEFAULT_SZ_DECIMALS;
 
     if (typeof privateKey !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
       return NextResponse.json({ status: 'err', msg: 'Missing private key' }, { status: 400 });
@@ -163,10 +166,10 @@ export async function POST(req: NextRequest) {
 
     // Build wire-format orders
     const orderWires: OrderWire[] = (orders as DeployOrder[]).map(o => ({
-      a: BTC_ASSET_INDEX,
+      a: resolvedAssetIndex,
       b: o.is_buy,
       p: String(Math.round(o.limit_px)),
-      s: o.sz.toFixed(3).replace(/\.?0+$/, ''),
+      s: o.sz.toFixed(resolvedSzDecimals).replace(/\.?0+$/, ''),
       r: o.reduce_only,
       t: o.order_type,
     }));

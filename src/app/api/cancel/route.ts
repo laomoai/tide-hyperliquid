@@ -5,7 +5,6 @@ import { Wallet, keccak256, getBytes } from 'ethers';
 import { encode as msgpackEncode } from '@msgpack/msgpack';
 
 const HL_EXCHANGE_URL = 'https://api.hyperliquid.xyz/exchange';
-const BTC_ASSET_INDEX = 0;
 
 const HL_DOMAIN = {
   name: 'Exchange',
@@ -71,19 +70,22 @@ async function signL1Action(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { privateKey, orderIds } = body;
+    const { privateKey, cancels } = body;
 
     if (typeof privateKey !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
       return NextResponse.json({ status: 'err', msg: '缺少有效私钥' }, { status: 400 });
     }
-    if (!Array.isArray(orderIds) || orderIds.length === 0 || !orderIds.every(id => typeof id === 'number')) {
-      return NextResponse.json({ status: 'err', msg: '无效订单 ID 列表' }, { status: 400 });
+    if (!Array.isArray(cancels) || cancels.length === 0 ||
+        !cancels.every((c: unknown) => c !== null && typeof c === 'object' &&
+          typeof (c as Record<string, unknown>).oid === 'number' &&
+          typeof (c as Record<string, unknown>).assetIndex === 'number')) {
+      return NextResponse.json({ status: 'err', msg: '无效取消列表' }, { status: 400 });
     }
 
     const wallet = new Wallet(privateKey);
     const action = {
       type: 'cancel',
-      cancels: orderIds.map((oid: number) => ({ a: BTC_ASSET_INDEX, o: oid })),
+      cancels: (cancels as { oid: number; assetIndex: number }[]).map(c => ({ a: c.assetIndex, o: c.oid })),
     };
     const nonce = Date.now();
     const signature = await signL1Action(wallet, action, null, nonce);

@@ -2,10 +2,11 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createChart, IChartApi, IPriceLine, ISeriesApi, Time, CandlestickSeries, LineSeries } from 'lightweight-charts';
-import { Sun, Moon, Check, Zap, Wallet, BarChart, Settings as SettingsIcon, AlertCircle, Loader2 } from 'lucide-react';
+import { Sun, Moon, Check, Zap, Wallet, BarChart, Settings as SettingsIcon, AlertCircle, Loader2, ChevronDown } from 'lucide-react';
 import Link from 'next/link';
 
 type HLCandle = { t: number; T: number; s: string; i: string; o: string; h: string; l: string; c: string; v: string; n: number; };
+type CoinConfig = { assetIndex: number; szDecimals: number; };
 
 const HL_API = 'https://api.hyperliquid.xyz/info';
 const INTERVAL_MS: Record<string, number> = {
@@ -16,8 +17,8 @@ function getPerpAccountValue(data: any): number {
   return parseFloat(data?.marginSummary?.accountValue) || 0;
 }
 
-async function fetchHLCandles(interval: string, startTime: number, endTime?: number): Promise<HLCandle[]> {
-  const req: any = { coin: 'BTC', interval, startTime };
+async function fetchHLCandles(coin: string, interval: string, startTime: number, endTime?: number): Promise<HLCandle[]> {
+  const req: any = { coin, interval, startTime };
   if (endTime) req.endTime = endTime;
   const res = await fetch(HL_API, {
     method: 'POST',
@@ -28,9 +29,9 @@ async function fetchHLCandles(interval: string, startTime: number, endTime?: num
   return res.json();
 }
 
-async function fetch2200Candles(interval: string): Promise<HLCandle[]> {
+async function fetch2200Candles(coin: string, interval: string): Promise<HLCandle[]> {
   const ms = INTERVAL_MS[interval] ?? INTERVAL_MS['1h'];
-  return fetchHLCandles(interval, Date.now() - 2200 * ms);
+  return fetchHLCandles(coin, interval, Date.now() - 2200 * ms);
 }
 
 function getHighLow(candles: HLCandle[]): { high: number; low: number } {
@@ -161,6 +162,13 @@ export default function Home() {
   const isResizingRef = useRef(false);
   const hasMountedRef = useRef(false);
 
+  // 交易对选择
+  const [activeCoin, setActiveCoin] = useState('BTC');
+  const [coinMetaMap, setCoinMetaMap] = useState<Record<string, CoinConfig>>({});
+  const [coinDropdownOpen, setCoinDropdownOpen] = useState(false);
+  const [coinSearch, setCoinSearch] = useState('');
+  const coinDropdownRef = useRef<HTMLDivElement>(null);
+
   const [reduceOnlySells, setReduceOnlySells] = useState(true);
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployResult, setDeployResult] = useState<{status: 'success' | 'err', msg: string} | null>(null);
@@ -290,22 +298,25 @@ export default function Home() {
     setDeployResult(null);
 
     try {
-      // 2. Format Orders payload natively for Hyperliquid SDK
-      // BTC-PERP: tick size = $1 (price integer), lot size = 0.001 BTC (3 decimal places), min sz = 0.001
-      const BTC_LOT = 0.001;
+      const coinCfg = coinMetaMap[activeCoin];
+      const LOT_SIZE = coinCfg ? Math.pow(10, -coinCfg.szDecimals) : 0.001;
+      const ASSET_INDEX = coinCfg?.assetIndex ?? 0;
+      const SZ_DECIMALS = coinCfg?.szDecimals ?? 3;
+      const COIN_PERP = `${activeCoin}-PERP`;
+
       const bulkOrders = activeOrders
         .map(m => {
           const isBuy = m.side === 'Buy';
           const rawSz = parseFloat(m.sizeStr) || 0;
-          const sz = Math.floor(rawSz / BTC_LOT) * BTC_LOT;
+          const sz = Math.floor(rawSz / LOT_SIZE) * LOT_SIZE;
           const px = Math.round(m.price);
           const reduce_only = !isBuy && reduceOnlySells;
-          return { coin: 'BTC-PERP', is_buy: isBuy, sz, limit_px: px, order_type: { limit: { tif: 'Gtc' } }, reduce_only };
+          return { coin: COIN_PERP, is_buy: isBuy, sz, limit_px: px, order_type: { limit: { tif: 'Gtc' } }, reduce_only };
         })
-        .filter(o => o.sz >= BTC_LOT);
+        .filter(o => o.sz >= LOT_SIZE);
 
       if (bulkOrders.length === 0) {
-        setDeployResult({ status: 'err', msg: '所有订单数量均低于最小下单量 0.001 BTC，请调大总规模或减少网格数量' });
+        setDeployResult({ status: 'err', msg: `所有订单数量均低于最小下单量 ${LOT_SIZE} ${activeCoin}，请调大总规模或减少网格数量` });
         setIsDeploying(false);
         return;
       }
@@ -318,7 +329,7 @@ export default function Home() {
       const res = await fetch('/api/deploy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ privateKey: pk, masterAddress, orders: bulkOrders })
+        body: JSON.stringify({ privateKey: pk, masterAddress, orders: bulkOrders, assetIndex: ASSET_INDEX, szDecimals: SZ_DECIMALS })
       });
       
       const response = await res.json();
@@ -365,20 +376,25 @@ export default function Home() {
     }
   };
 
-  const handleCancelOrders = async (oids: number[]) => {
+  // orders: { oid, coin } — coin 用于从 coinMetaMap 取 assetIndex
+  const handleCancelOrders = async (orders: { oid: number; coin: string }[]) => {
     const pk = typeof window !== 'undefined' ? localStorage.getItem('hlPrivateKey') : null;
     if (!pk) { setCancelResult({ status: 'err', msg: '缺少私钥' }); return; }
     setIsCanceling(true);
     setCancelResult(null);
+    const cancels = orders.map(o => ({
+      oid: o.oid,
+      assetIndex: coinMetaMap[o.coin]?.assetIndex ?? 0,
+    }));
     try {
       const res = await fetch('/api/cancel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ privateKey: pk, orderIds: oids }),
+        body: JSON.stringify({ privateKey: pk, cancels }),
       });
       const data = await res.json();
       if (data?.status === 'ok' || data?.response?.type === 'cancel') {
-        setCancelResult({ status: 'success', msg: `已取消 ${oids.length} 个订单` });
+        setCancelResult({ status: 'success', msg: `已取消 ${orders.length} 个订单` });
         await fetchOpenOrders();
       } else {
         setCancelResult({ status: 'err', msg: data?.msg || JSON.stringify(data) });
@@ -400,25 +416,49 @@ export default function Home() {
     if (sc) setTotalCapital(parseInt(sc, 10) || 1000);
     const sz = localStorage.getItem('sidebarZoom');
     if (sz) setSidebarZoom(parseFloat(sz) || 1.0);
+    const coin = localStorage.getItem('activeCoin');
+    if (coin) setActiveCoin(coin);
     hasMountedRef.current = true;
   }, []);
 
-  useEffect(() => {
-    if (!hasMountedRef.current) return;
-    localStorage.setItem('leverage', String(leverage));
-  }, [leverage]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('leverage', String(leverage)); }, [leverage]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('totalCapital', String(totalCapital)); }, [totalCapital]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('sidebarZoom', String(sidebarZoom)); }, [sidebarZoom]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('activeCoin', activeCoin); }, [activeCoin]);
 
+  // 拉取 HL 所有交易对元数据（asset index、szDecimals）
   useEffect(() => {
-    if (!hasMountedRef.current) return;
-    localStorage.setItem('totalCapital', String(totalCapital));
-  }, [totalCapital]);
+    fetch(HL_API, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'meta' }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data?.universe)) {
+          const map: Record<string, CoinConfig> = {};
+          data.universe.forEach((asset: any, i: number) => {
+            map[asset.name] = { assetIndex: i, szDecimals: asset.szDecimals };
+          });
+          setCoinMetaMap(map);
+        }
+      })
+      .catch(console.error);
+  }, []);
 
+  // 点击下拉框外部关闭
   useEffect(() => {
-    if (!hasMountedRef.current) return;
-    localStorage.setItem('sidebarZoom', String(sidebarZoom));
-  }, [sidebarZoom]);
+    const handler = (e: MouseEvent) => {
+      if (coinDropdownRef.current && !coinDropdownRef.current.contains(e.target as Node)) {
+        setCoinDropdownOpen(false);
+        setCoinSearch('');
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
-  // Fetch HL master spot balance and BTC-PERP position
+  // Fetch HL master spot balance and position for activeCoin
   useEffect(() => {
     const fetchPos = async () => {
       if (typeof window === 'undefined') return;
@@ -431,23 +471,17 @@ export default function Home() {
           body: JSON.stringify({ type: "clearinghouseState", user: addr })
         });
         const perpData = await perpRes.json();
-
         setAccountValue(getPerpAccountValue(perpData));
-
-        const btcPos = perpData?.assetPositions?.find((p: any) => p.position.coin === 'BTC');
-        if (btcPos) {
-          setHlPosition(btcPos.position);
-        } else {
-          setHlPosition('empty');
-        }
+        const pos = perpData?.assetPositions?.find((p: any) => p.position.coin === activeCoin);
+        setHlPosition(pos ? pos.position : 'empty');
       } catch (e) {
         console.error("HL Fetch Error", e);
       }
     };
     fetchPos();
-    const interval = setInterval(fetchPos, 10000); // Poll every 10s
+    const interval = setInterval(fetchPos, 10000);
     return () => clearInterval(interval);
-  }, []);
+  }, [activeCoin]);
 
   // Theme Config Applicator
   useEffect(() => {
@@ -561,13 +595,13 @@ export default function Home() {
       try {
         setLoading(true);
         setErrorMSG(null);
-        
+
         const fibParam = getFibParam();
         const now = Date.now();
         const [klineData, kline1D, kline4H] = await Promise.all([
-          fetch2200Candles(activeInterval),
-          fetchHLCandles('1d', now - fibParam * INTERVAL_MS['1d']),
-          fetchHLCandles('4h', now - fibParam * INTERVAL_MS['4h']),
+          fetch2200Candles(activeCoin, activeInterval),
+          fetchHLCandles(activeCoin, '1d', now - fibParam * INTERVAL_MS['1d']),
+          fetchHLCandles(activeCoin, '4h', now - fibParam * INTERVAL_MS['4h']),
         ]);
 
         if (!isMounted) return;
@@ -609,7 +643,7 @@ export default function Home() {
     ws.onopen = () => {
       ws.send(JSON.stringify({
         method: 'subscribe',
-        subscription: { type: 'candle', coin: 'BTC', interval: activeInterval },
+        subscription: { type: 'candle', coin: activeCoin, interval: activeInterval },
       }));
     };
 
@@ -646,14 +680,14 @@ export default function Home() {
         if (wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({
             method: 'unsubscribe',
-            subscription: { type: 'candle', coin: 'BTC', interval: activeInterval },
+            subscription: { type: 'candle', coin: activeCoin, interval: activeInterval },
           }));
         }
         wsRef.current.close();
         wsRef.current = null;
       }
     };
-  }, [activeInterval]);
+  }, [activeInterval, activeCoin]);
 
   // Reactive Update: K-Line Data
   useEffect(() => {
@@ -715,7 +749,7 @@ export default function Home() {
 
         const sizeRatio = (parseFloat(m.sizeStr) || 0) / maxSize;
         const sideZh = m.side === 'Buy' ? '买入' : '卖空';
-        const labelTitle = m.active ? `${'★'.repeat(m.weight)} ${sideZh} ${m.sizeStr} BTC` : '';
+        const labelTitle = m.active ? `${'★'.repeat(m.weight)} ${sideZh} ${m.sizeStr} ${activeCoin}` : '';
 
         const line = seriesRef.current!.createPriceLine({
           price: m.price,
@@ -744,7 +778,7 @@ export default function Home() {
       const sizeRatio = (parseFloat(m.sizeStr) || 0) / maxSize;
       const pad = ' '.repeat(Math.round(sizeRatio * 24));
       const sideZh = m.side === 'Buy' ? '买入' : '卖空';
-      const labelTitle = m.active ? `${'★'.repeat(m.weight)} ${sideZh} ${m.sizeStr} BTC${pad}` : '';
+      const labelTitle = m.active ? `${'★'.repeat(m.weight)} ${sideZh} ${m.sizeStr} ${activeCoin}${pad}` : '';
 
       targetLines[index].applyOptions({
         title: labelTitle,
@@ -775,8 +809,51 @@ export default function Home() {
           </div>
           <div className="h-6 w-px bg-border-subtle hidden sm:block"></div>
           <div className="flex flex-col">
-            <div className="flex items-center space-x-2">
-              <span className="text-sm lg:text-lg font-bold">BTC-PERP</span>
+            {/* 交易对下拉选择器 */}
+            <div ref={coinDropdownRef} className="relative">
+              <button
+                onClick={() => { setCoinDropdownOpen(v => !v); setCoinSearch(''); }}
+                className="flex items-center gap-1 text-sm lg:text-lg font-bold hover:text-fib-a transition-colors"
+              >
+                {activeCoin}-PERP
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${coinDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+              {coinDropdownOpen && (
+                <div className="absolute top-full left-0 mt-1 w-52 bg-bg-card border border-border-subtle rounded-md shadow-2xl z-50 overflow-hidden">
+                  <input
+                    autoFocus
+                    value={coinSearch}
+                    onChange={e => setCoinSearch(e.target.value)}
+                    placeholder="搜索交易对..."
+                    className="w-full px-3 py-2 text-xs bg-bg-main border-b border-border-subtle outline-none text-text-main placeholder-text-muted"
+                  />
+                  <div className="max-h-52 overflow-y-auto custom-scrollbar">
+                    {Object.keys(coinMetaMap).length === 0 && (
+                      <div className="px-3 py-3 text-xs text-text-muted font-mono">加载中...</div>
+                    )}
+                    {Object.keys(coinMetaMap)
+                      .filter(c => c.toLowerCase().includes(coinSearch.toLowerCase()))
+                      .slice(0, 80)
+                      .map(coin => (
+                        <button
+                          key={coin}
+                          onClick={() => {
+                            setActiveCoin(coin);
+                            setCoinDropdownOpen(false);
+                            setCoinSearch('');
+                            setCurrentPrice(0);
+                            setFibGroupA(null);
+                            setFibGroupB(null);
+                            setManualOrderOverrides({});
+                          }}
+                          className={`w-full text-left px-3 py-1.5 text-xs font-mono transition-colors ${coin === activeCoin ? 'text-fib-a font-bold bg-fib-a/10' : 'text-text-main hover:bg-bg-main'}`}
+                        >
+                          {coin}-PERP {coin === activeCoin && '✓'}
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="text-[10px] text-text-muted tracking-widest font-mono">
               {currentPrice > 0 && <span className="text-text-main font-bold">${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}</span>}
@@ -1121,7 +1198,8 @@ export default function Home() {
                 <div className="flex-1 overflow-y-auto p-4 pt-2 custom-scrollbar space-y-2 relative z-0">
                   {matrix.map((m, i) => {
                     const szVal = parseFloat(m.sizeStr) || 0;
-                    const belowMin = m.active && szVal < 0.001;
+                    const lotSize = coinMetaMap[activeCoin] ? Math.pow(10, -coinMetaMap[activeCoin].szDecimals) : 0.001;
+                    const belowMin = m.active && szVal < lotSize;
                     return (
                     <div key={i} className={`p-2 rounded-md border transition-colors text-xs font-mono group ${belowMin ? 'bg-kline-down/5 border-kline-down/40' : m.active ? 'bg-bg-card border-border-subtle hover:border-text-muted' : 'bg-bg-main border-border-subtle/30 opacity-50'}`}>
                       <div className="flex justify-between items-center mb-1">
@@ -1170,10 +1248,10 @@ export default function Home() {
                    </div>
                  </label>
                  <button
-                   disabled={isDeploying || matrix.filter(m => m.active).length === 0 || matrix.some(m => m.active && (parseFloat(m.sizeStr) || 0) < 0.001)}
+                   disabled={isDeploying || matrix.filter(m => m.active).length === 0 || matrix.some(m => { const lot = coinMetaMap[activeCoin] ? Math.pow(10, -coinMetaMap[activeCoin].szDecimals) : 0.001; return m.active && (parseFloat(m.sizeStr) || 0) < lot; })}
                    onClick={handleDeployOrders}
                    className={`w-full py-3 rounded-md font-bold transition-colors flex items-center justify-center tracking-wider text-sm
-                     ${isDeploying || matrix.filter(m => m.active).length === 0 || matrix.some(m => m.active && (parseFloat(m.sizeStr) || 0) < 0.001) ? 'bg-bg-main text-text-muted border border-border-subtle cursor-not-allowed' : 'bg-fib-a hover:bg-fib-a/90 text-white'}
+                     ${isDeploying || matrix.filter(m => m.active).length === 0 || matrix.some(m => { const lot = coinMetaMap[activeCoin] ? Math.pow(10, -coinMetaMap[activeCoin].szDecimals) : 0.001; return m.active && (parseFloat(m.sizeStr) || 0) < lot; }) ? 'bg-bg-main text-text-muted border border-border-subtle cursor-not-allowed' : 'bg-fib-a hover:bg-fib-a/90 text-white'}
                    `}>
                     {isDeploying ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Zap className="w-4 h-4 mr-2 fill-current"/>}
                     {isDeploying ? '正在计算 L1 签名并部署...' : '⚡ 一键部署限价单'}
@@ -1201,7 +1279,7 @@ export default function Home() {
                 <div className="flex items-center gap-2">
                   {selectedOrderIds.size > 0 && (
                     <button
-                      onClick={() => handleCancelOrders(Array.from(selectedOrderIds))}
+                      onClick={() => handleCancelOrders(openOrders.filter(o => selectedOrderIds.has(o.oid)).map(o => ({ oid: o.oid, coin: o.coin })))}
                       disabled={isCanceling}
                       className="text-xs font-bold px-2 py-1 rounded bg-kline-down/20 text-kline-down border border-kline-down/40 hover:bg-kline-down/30 transition-colors disabled:opacity-50"
                     >
@@ -1210,7 +1288,7 @@ export default function Home() {
                   )}
                   {openOrders.length > 0 && (
                     <button
-                      onClick={() => handleCancelOrders(openOrders.map(o => o.oid))}
+                      onClick={() => handleCancelOrders(openOrders.map(o => ({ oid: o.oid, coin: o.coin })))}
                       disabled={isCanceling}
                       className="text-xs font-bold px-2 py-1 rounded bg-kline-down/10 text-kline-down border border-kline-down/30 hover:bg-kline-down/20 transition-colors disabled:opacity-50"
                     >
@@ -1263,14 +1341,14 @@ export default function Home() {
                             {isBuy ? '买入' : '卖出'}
                           </span>
                           <button
-                            onClick={e => { e.stopPropagation(); handleCancelOrders([order.oid]); }}
+                            onClick={e => { e.stopPropagation(); handleCancelOrders([{ oid: order.oid, coin: order.coin }]); }}
                             disabled={isCanceling}
                             className="text-[9px] font-bold px-1.5 py-0.5 rounded border border-kline-down/40 text-kline-down hover:bg-kline-down/10 transition-colors disabled:opacity-40"
                           >取消</button>
                         </div>
                       </div>
                       <div className="flex justify-between items-center text-text-muted">
-                        <span>{order.sz} BTC <span className="text-[9px]">≈${usdVal}</span></span>
+                        <span>{order.sz} {order.coin} <span className="text-[9px]">≈${usdVal}</span></span>
                         <span className="text-[9px] opacity-60">{new Date(order.timestamp).toLocaleTimeString('zh-CN')}</span>
                       </div>
                     </div>
