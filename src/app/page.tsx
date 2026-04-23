@@ -176,7 +176,7 @@ export default function Home() {
   const paramNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 现有订单
-  type OpenOrder = { coin: string; side: string; limitPx: string; sz: string; oid: number; timestamp: number; origSz: string; orderType?: string; triggerPx?: string; };
+  type OpenOrder = { coin: string; side: string; limitPx: string; sz: string; oid: number; timestamp: number; origSz: string; orderType?: string; triggerPx?: string; triggerCondition?: string; };
   const [openOrders, setOpenOrders] = useState<OpenOrder[]>([]);
   const [isFetchingOpenOrders, setIsFetchingOpenOrders] = useState(false);
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<number>>(new Set());
@@ -1350,9 +1350,14 @@ export default function Home() {
                                     <input type="checkbox" readOnly checked={isSelected}
                                       className="rounded border-border-subtle text-fib-a bg-bg-main w-3.5 h-3.5 pointer-events-none" />
                                     {isTrigger ? (
-                                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-text-muted/10 text-text-muted border border-text-muted/20">
-                                        {order.orderType}
-                                      </span>
+                                      <div className="flex flex-col gap-0.5">
+                                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-text-muted/10 text-text-muted border border-text-muted/20 self-start">
+                                          {order.orderType}
+                                        </span>
+                                        {order.triggerCondition && (
+                                          <span className="text-[9px] text-text-muted/70 font-mono">触发条件：{order.triggerCondition}</span>
+                                        )}
+                                      </div>
                                     ) : (
                                       <span className="font-bold text-sm text-text-main">${parseFloat(order.limitPx).toFixed(1)}</span>
                                     )}
