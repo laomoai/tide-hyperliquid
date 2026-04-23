@@ -8,6 +8,7 @@ const jetbrainsMono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mon
 export const metadata: Metadata = {
   title: 'Tide - 量化交易终端',
   description: 'Tide - 量化交易终端',
+  icons: { icon: '/tide.svg' },
 };
 
 export default function RootLayout({children}: {children: React.ReactNode}) {
