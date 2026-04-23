@@ -364,7 +364,7 @@ export default function Home() {
       const res = await fetch('https://api.hyperliquid.xyz/info', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'openOrders', user: addr }),
+        body: JSON.stringify({ type: 'frontendOpenOrders', user: addr }),
       });
       const data = await res.json();
       setOpenOrders(Array.isArray(data) ? data : []);
