@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createChart, IChartApi, IPriceLine, ISeriesApi, Time, CandlestickSeries, LineSeries } from 'lightweight-charts';
-import { Sun, Moon, Check, Zap, Wallet, BarChart, Settings as SettingsIcon, AlertCircle, Loader2, ChevronDown } from 'lucide-react';
+import { Sun, Moon, Check, Zap, Wallet, BarChart, Settings as SettingsIcon, AlertCircle, Loader2, ChevronDown, DollarSign, Pencil, RotateCcw } from 'lucide-react';
 import Link from 'next/link';
 
 type HLCandle = { t: number; T: number; s: string; i: string; o: string; h: string; l: string; c: string; v: string; n: number; };
@@ -10,6 +10,7 @@ type CoinConfig = { assetIndex: number; szDecimals: number; };
 
 const HL_API = 'https://api.hyperliquid.xyz/info';
 const INTERVAL_MS: Record<string, number> = {
+  '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
   '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '1d': 86_400_000,
 };
 
@@ -131,6 +132,11 @@ export default function Home() {
   const emaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const lastEmaRef = useRef<number>(0);
   const matrixLinesRef = useRef<IPriceLine[]>([]);
+  const openOrderLinesRef = useRef<IPriceLine[]>([]);
+  const openOrdersRef = useRef<OpenOrder[]>([]);
+  const positionLineRef = useRef<IPriceLine | null>(null);
+  const hlPositionsRef = useRef<any[]>([]);
+  const activeCoinRef = useRef<string>('BTC');
 
   const [loading, setLoading] = useState(true);
   const [errorMSG, setErrorMSG] = useState<string | null>(null);
@@ -148,16 +154,21 @@ export default function Home() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   // Strategy Panel States
-  const [hlPosition, setHlPosition] = useState<any>(null);
+  // null = 加载中；[] = 无持仓；非空数组 = 持仓列表
+  const [hlPositions, setHlPositions] = useState<any[] | null>(null);
   const [tolerance, setTolerance] = useState<number>(0.5);
   const [depthScale, setDepthScale] = useState<number>(0.2);
   const [totalCapital, setTotalCapital] = useState<number>(1000);
   const [leverage, setLeverage] = useState<number>(10);
   const [accountValue, setAccountValue] = useState<number>(0);
-  const [manualOrderOverrides, setManualOrderOverrides] = useState<Record<string, { active?: boolean; sizeStr?: string; isManual?: boolean }>>({});
+  const [balanceHistory, setBalanceHistory] = useState<{ ts: number; value: number }[]>([]);
+  const balanceHistoryRef = useRef<{ ts: number; value: number }[]>([]);
+  const [manualOrderOverrides, setManualOrderOverrides] = useState<Record<string, { active?: boolean; sizeStr?: string; isManual?: boolean; priceStr?: string; isManualPrice?: boolean }>>({});
+  const [editingPriceIndex, setEditingPriceIndex] = useState<number>(-1);
+  const [priceDraft, setPriceDraft] = useState<string>('');
 
   const [sidebarWidth, setSidebarWidth] = useState(580);
-  const [sidebarTab, setSidebarTab] = useState<'orders' | 'openOrders' | 'params'>('orders');
+  const [sidebarTab, setSidebarTab] = useState<'orders' | 'openOrders' | 'params' | 'balance'>('orders');
   const [sidebarZoom, setSidebarZoom] = useState(1.0);
   const isResizingRef = useRef(false);
   const hasMountedRef = useRef(false);
@@ -193,17 +204,36 @@ export default function Home() {
   }, [fibGroupA, fibGroupB, showFibA, showFibB, currentPrice, tolerance, totalCapital, depthScale]);
 
   const matrix = useMemo(() => {
-    return generatedMatrix.map((gen) => {
+    const merged = generatedMatrix.map((gen) => {
       const existing = manualOrderOverrides[orderKey(gen.price)];
-      if (!existing) return gen;
-      return {
+      const base = {
         ...gen,
+        origPrice: gen.price,
+        isManualPrice: false as boolean,
+      };
+      if (!existing) return base;
+      let price = gen.price;
+      let isManualPrice = false;
+      if (existing.isManualPrice && existing.priceStr !== undefined) {
+        const parsed = parseFloat(existing.priceStr);
+        if (!isNaN(parsed) && parsed > 0) {
+          price = parsed;
+          isManualPrice = true;
+        }
+      }
+      const side: 'Buy' | 'Sell' = price > currentPrice ? 'Sell' : 'Buy';
+      return {
+        ...base,
+        price,
+        side,
         active: existing.active ?? gen.active,
         sizeStr: existing.isManual ? (existing.sizeStr ?? gen.sizeStr) : gen.sizeStr,
         isManual: Boolean(existing.isManual),
+        isManualPrice,
       };
     });
-  }, [generatedMatrix, manualOrderOverrides]);
+    return merged.sort((a, b) => b.price - a.price);
+  }, [generatedMatrix, manualOrderOverrides, currentPrice]);
 
   const allActive = matrix.length > 0 && matrix.every(m => m.active);
 
@@ -211,7 +241,8 @@ export default function Home() {
     setManualOrderOverrides(prev => {
       const updated = { ...prev };
       matrix.forEach(m => {
-        updated[orderKey(m.price)] = { ...prev[orderKey(m.price)], active: predicate(m) };
+        const k = orderKey(m.origPrice);
+        updated[k] = { ...prev[k], active: predicate(m) };
       });
       return updated;
     });
@@ -247,10 +278,11 @@ export default function Home() {
   const toggleOrderActive = (index: number) => {
     const order = matrix[index];
     if (!order) return;
+    const k = orderKey(order.origPrice);
     setManualOrderOverrides((prev) => ({
       ...prev,
-      [orderKey(order.price)]: {
-        ...prev[orderKey(order.price)],
+      [k]: {
+        ...prev[k],
         active: !order.active,
       },
     }));
@@ -259,12 +291,13 @@ export default function Home() {
   const handleOrderSizeChange = (index: number, newSize: string) => {
     const order = matrix[index];
     if (!order) return;
+    const k = orderKey(order.origPrice);
 
     const newMatrix = matrix.map((m, i) => i === index ? { ...m, sizeStr: newSize, isManual: true } : m);
     setManualOrderOverrides((prev) => ({
       ...prev,
-      [orderKey(order.price)]: {
-        ...prev[orderKey(order.price)],
+      [k]: {
+        ...prev[k],
         sizeStr: newSize,
         isManual: true,
       },
@@ -275,6 +308,38 @@ export default function Home() {
       return sum + (sz * m.price);
     }, 0);
     setTotalCapital(Math.round(updatedCap));
+  };
+
+  const commitOrderPrice = (index: number, newPriceStr: string) => {
+    const order = matrix[index];
+    if (!order) return;
+    const k = orderKey(order.origPrice);
+    const parsed = parseFloat(newPriceStr);
+    setManualOrderOverrides((prev) => {
+      const cur = prev[k] ?? {};
+      // 非法输入或等于原价：视为恢复默认
+      if (isNaN(parsed) || parsed <= 0 || Math.abs(parsed - order.origPrice) < 1e-9) {
+        const { priceStr: _p, isManualPrice: _i, ...rest } = cur;
+        return { ...prev, [k]: rest };
+      }
+      return {
+        ...prev,
+        [k]: { ...cur, priceStr: String(parsed), isManualPrice: true },
+      };
+    });
+    setEditingPriceIndex(-1);
+  };
+
+  const resetOrderPrice = (index: number) => {
+    const order = matrix[index];
+    if (!order) return;
+    const k = orderKey(order.origPrice);
+    setManualOrderOverrides((prev) => {
+      const cur = prev[k];
+      if (!cur) return prev;
+      const { priceStr: _p, isManualPrice: _i, ...rest } = cur;
+      return { ...prev, [k]: rest };
+    });
   };
 
   const handleDeployOrders = async () => {
@@ -308,8 +373,8 @@ export default function Home() {
         .map(m => {
           const isBuy = m.side === 'Buy';
           const rawSz = parseFloat(m.sizeStr) || 0;
-          const sz = Math.floor(rawSz / LOT_SIZE) * LOT_SIZE;
-          const px = Math.round(m.price);
+          const sz = parseFloat((Math.floor(rawSz / LOT_SIZE) * LOT_SIZE).toFixed(SZ_DECIMALS));
+          const px = parseFloat(m.price.toPrecision(5));
           const reduce_only = !isBuy && reduceOnlySells;
           return { coin: COIN_PERP, is_buy: isBuy, sz, limit_px: px, order_type: { limit: { tif: 'Gtc' } }, reduce_only };
         })
@@ -355,6 +420,55 @@ export default function Home() {
     }
   };
 
+  const drawOpenOrderLines = (orders: OpenOrder[], coin: string) => {
+    if (!seriesRef.current) return;
+    openOrderLinesRef.current.forEach(line => seriesRef.current?.removePriceLine(line));
+    openOrderLinesRef.current = [];
+    const matched = orders.filter(o => o.coin === coin || o.coin === `${coin}-PERP`);
+    matched.forEach(o => {
+      const triggerPx = parseFloat(o.triggerPx ?? '0');
+      const px = triggerPx > 0 ? triggerPx : parseFloat(o.limitPx);
+      if (isNaN(px) || px <= 0) return;
+      const isBuy = o.side === 'B';
+      const sideZh = isBuy ? '买' : '卖';
+      const typeZh = triggerPx > 0 ? (o.triggerCondition === 'above' ? '止盈' : '止损') : '限价';
+      const line = seriesRef.current!.createPriceLine({
+        price: px,
+        color: '#1E3A5F',
+        lineWidth: 1,
+        lineStyle: 3,
+        axisLabelVisible: true,
+        axisLabelTextColor: '#FFFFFF',
+        title: `◆ ${sideZh}${typeZh} ${o.sz}`,
+      });
+      openOrderLinesRef.current.push(line);
+    });
+  };
+
+  const drawPositionLine = (positions: any[] | null, coin: string) => {
+    if (!seriesRef.current) return;
+    if (positionLineRef.current) {
+      seriesRef.current.removePriceLine(positionLineRef.current);
+      positionLineRef.current = null;
+    }
+    if (!positions || positions.length === 0) return;
+    const pos = positions.find(p => p?.coin === coin);
+    if (!pos) return;
+    const entryPx = parseFloat(pos.entryPx);
+    const szi = parseFloat(pos.szi);
+    if (isNaN(entryPx) || entryPx <= 0) return;
+    const isLong = szi > 0;
+    positionLineRef.current = seriesRef.current.createPriceLine({
+      price: entryPx,
+      color: '#FFD700',
+      lineWidth: 2,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      axisLabelTextColor: '#000000',
+      title: `● ${isLong ? '多' : '空'} ${Math.abs(szi)}`,
+    });
+  };
+
   const fetchOpenOrders = async () => {
     const addr = typeof window !== 'undefined' ? localStorage.getItem('hlAddress') : null;
     if (!addr) return;
@@ -367,9 +481,13 @@ export default function Home() {
         body: JSON.stringify({ type: 'frontendOpenOrders', user: addr }),
       });
       const data = await res.json();
-      setOpenOrders(Array.isArray(data) ? data : []);
+      const orders = Array.isArray(data) ? data : [];
+      openOrdersRef.current = orders;
+      setOpenOrders(orders);
       setSelectedOrderIds(new Set());
+      drawOpenOrderLines(orders, activeCoinRef.current);
     } catch {
+      openOrdersRef.current = [];
       setOpenOrders([]);
     } finally {
       setIsFetchingOpenOrders(false);
@@ -418,13 +536,55 @@ export default function Home() {
     if (sz) setSidebarZoom(parseFloat(sz) || 1.0);
     const coin = localStorage.getItem('activeCoin');
     if (coin) setActiveCoin(coin);
+    const stol = localStorage.getItem('tolerance');
+    if (stol) setTolerance(parseFloat(stol) || 0.5);
+    const sds = localStorage.getItem('depthScale');
+    if (sds) setDepthScale(parseFloat(sds) || 0.2);
+    const stheme = localStorage.getItem('theme');
+    if (stheme === 'light' || stheme === 'dark') setTheme(stheme);
+    const sfibA = localStorage.getItem('showFibA');
+    if (sfibA !== null) setShowFibA(sfibA !== 'false');
+    const sfibB = localStorage.getItem('showFibB');
+    if (sfibB !== null) setShowFibB(sfibB !== 'false');
+    const sgrid = localStorage.getItem('showGrid');
+    if (sgrid !== null) setShowGrid(sgrid === 'true');
+    const sros = localStorage.getItem('reduceOnlySells');
+    if (sros !== null) setReduceOnlySells(sros !== 'false');
+    const sint = localStorage.getItem('activeInterval');
+    if (sint) setActiveInterval(sint);
+    try {
+      const sbh = localStorage.getItem('balanceHistory');
+      if (sbh) {
+        const parsed = JSON.parse(sbh);
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter((e: any) => typeof e?.ts === 'number' && typeof e?.value === 'number');
+          balanceHistoryRef.current = clean;
+          setBalanceHistory(clean);
+        }
+      }
+    } catch {}
     hasMountedRef.current = true;
+    fetchOpenOrders();
   }, []);
 
   useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('leverage', String(leverage)); }, [leverage]);
   useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('totalCapital', String(totalCapital)); }, [totalCapital]);
   useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('sidebarZoom', String(sidebarZoom)); }, [sidebarZoom]);
-  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('activeCoin', activeCoin); }, [activeCoin]);
+  useEffect(() => {
+    activeCoinRef.current = activeCoin;
+    if (!hasMountedRef.current) return;
+    localStorage.setItem('activeCoin', activeCoin);
+    drawOpenOrderLines(openOrdersRef.current, activeCoin);
+    drawPositionLine(hlPositionsRef.current, activeCoin);
+  }, [activeCoin]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('tolerance', String(tolerance)); }, [tolerance]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('depthScale', String(depthScale)); }, [depthScale]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('theme', theme); }, [theme]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('showFibA', String(showFibA)); }, [showFibA]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('showFibB', String(showFibB)); }, [showFibB]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('showGrid', String(showGrid)); }, [showGrid]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('reduceOnlySells', String(reduceOnlySells)); }, [reduceOnlySells]);
+  useEffect(() => { if (!hasMountedRef.current) return; localStorage.setItem('activeInterval', activeInterval); }, [activeInterval]);
 
   // 拉取 HL 所有交易对元数据（asset index、szDecimals）
   useEffect(() => {
@@ -458,7 +618,7 @@ export default function Home() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Fetch HL master spot balance and position for activeCoin
+  // Fetch HL account value and all open positions
   useEffect(() => {
     const fetchPos = async () => {
       if (typeof window === 'undefined') return;
@@ -472,8 +632,26 @@ export default function Home() {
         });
         const perpData = await perpRes.json();
         setAccountValue(getPerpAccountValue(perpData));
-        const pos = perpData?.assetPositions?.find((p: any) => p.position.coin === activeCoin);
-        setHlPosition(pos ? pos.position : 'empty');
+        const positions = Array.isArray(perpData?.assetPositions)
+          ? perpData.assetPositions.map((p: any) => p.position)
+          : [];
+        hlPositionsRef.current = positions;
+        setHlPositions(positions);
+        drawPositionLine(positions, activeCoinRef.current);
+
+        // 余额快照：含浮盈的账户总权益（accountValue），每 24h 追加一条
+        const balance = parseFloat(perpData?.marginSummary?.accountValue);
+        if (!isNaN(balance) && balance > 0) {
+          const now = Date.now();
+          const history = balanceHistoryRef.current;
+          const last = history[history.length - 1];
+          if (!last || now - last.ts >= 24 * 60 * 60 * 1000) {
+            const next = [...history, { ts: now, value: balance }];
+            balanceHistoryRef.current = next;
+            setBalanceHistory(next);
+            try { localStorage.setItem('balanceHistory', JSON.stringify(next)); } catch {}
+          }
+        }
       } catch (e) {
         console.error("HL Fetch Error", e);
       }
@@ -481,7 +659,7 @@ export default function Home() {
     fetchPos();
     const interval = setInterval(fetchPos, 10000);
     return () => clearInterval(interval);
-  }, [activeCoin]);
+  }, []);
 
   // Theme Config Applicator
   useEffect(() => {
@@ -550,6 +728,8 @@ export default function Home() {
     chartRef.current = chart;
     seriesRef.current = series;
     emaSeriesRef.current = emaSeries;
+    drawOpenOrderLines(openOrdersRef.current, activeCoinRef.current);
+    drawPositionLine(hlPositionsRef.current, activeCoinRef.current);
 
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
@@ -576,6 +756,9 @@ export default function Home() {
       chartRef.current = null;
       seriesRef.current = null;
       emaSeriesRef.current = null;
+      positionLineRef.current = null;
+      openOrderLinesRef.current = [];
+      matrixLinesRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -781,6 +964,7 @@ export default function Home() {
       const labelTitle = m.active ? `${'★'.repeat(m.weight)} ${sideZh} ${m.sizeStr} ${activeCoin}${pad}` : '';
 
       targetLines[index].applyOptions({
+        price: m.price,
         title: labelTitle,
         color: m.active ? color : 'rgba(0, 0, 0, 0)',
         axisLabelVisible: m.active,
@@ -792,7 +976,11 @@ export default function Home() {
 
   }, [matrix]);
 
+
   const intervals = [
+    { label: '5M', value: '5m' },
+    { label: '15M', value: '15m' },
+    { label: '30M', value: '30m' },
     { label: '1H', value: '1h' },
     { label: '2H', value: '2h' },
     { label: '4H', value: '4h' },
@@ -1003,6 +1191,12 @@ export default function Home() {
               )}
             </button>
             <button
+              onClick={() => setSidebarTab('balance')}
+              className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'balance' ? 'text-fib-a border-b-2 border-fib-a' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
+            >
+              <DollarSign className="w-4 h-4" /> 余额
+            </button>
+            <button
               onClick={() => setSidebarTab('params')}
               className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'params' ? 'text-fib-a border-b-2 border-fib-a' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
             >
@@ -1015,28 +1209,50 @@ export default function Home() {
             <div className="flex-1 overflow-y-auto custom-scrollbar">
               {/* Module A: Status */}
               <div className="p-4 border-b border-border-subtle">
-                <h3 className="text-sm font-bold uppercase tracking-wider text-text-muted mb-4 flex items-center"><Wallet className="w-4 h-4 mr-2"/> 全局状态 (HL BTC-PERP)</h3>
-                {!hlPosition && hlPosition !== 'empty' ? (
+                <h3 className="text-sm font-bold uppercase tracking-wider text-text-muted mb-4 flex items-center"><Wallet className="w-4 h-4 mr-2"/> 全局持仓 (HL Perp)</h3>
+                {hlPositions === null ? (
                   <div className="text-sm text-text-muted font-mono animate-pulse">正在连接 HyperLiquid...</div>
-                ) : hlPosition === 'empty' ? (
+                ) : hlPositions.length === 0 ? (
                   <div className="text-sm text-text-main font-mono p-3 bg-bg-main rounded border border-border-subtle">无可用持仓</div>
                 ) : (
-                  <div className="space-y-2 p-3 bg-bg-main rounded border border-border-subtle">
-                    <div className="flex justify-between items-center">
-                      <span className={`text-xs font-bold px-2 py-0.5 rounded ${parseFloat(hlPosition.szi) > 0 ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
-                        {parseFloat(hlPosition.szi) > 0 ? '做多' : '做空'}
-                      </span>
-                      <span className="font-mono font-bold text-base">{Math.abs(parseFloat(hlPosition.szi))} BTC</span>
-                    </div>
-                    <div className="flex justify-between items-center text-sm font-mono pt-2 border-t border-border-subtle/50">
-                      <span className="text-text-muted">未实现盈亏:</span>
-                      <span className={parseFloat(hlPosition.unrealizedPnl) >= 0 ? 'text-kline-up' : 'text-kline-down'}>
-                        {parseFloat(hlPosition.unrealizedPnl) > 0 ? '+' : ''}{parseFloat(hlPosition.unrealizedPnl).toFixed(2)} USDT
-                      </span>
-                    </div>
+                  <div className="space-y-2">
+                    {hlPositions.map((p: any) => {
+                      const szi = parseFloat(p.szi);
+                      const pnl = parseFloat(p.unrealizedPnl);
+                      const entryPx = parseFloat(p.entryPx);
+                      const isLong = szi > 0;
+                      const isActive = p.coin === activeCoin;
+                      return (
+                        <div
+                          key={p.coin}
+                          className={`space-y-2 p-3 bg-bg-main rounded border ${isActive ? 'border-yellow-500 ring-1 ring-yellow-500/40' : 'border-border-subtle'}`}
+                        >
+                          <div className="flex justify-between items-center">
+                            <div className="flex items-center gap-2">
+                              <span className={`text-xs font-bold px-2 py-0.5 rounded ${isLong ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>
+                                {isLong ? '做多' : '做空'}
+                              </span>
+                              <span className="text-sm font-bold text-text-main">{p.coin}</span>
+                              {isActive && <span className="text-[10px] font-bold text-yellow-500">● 当前</span>}
+                            </div>
+                            <span className="font-mono font-bold text-base">{Math.abs(szi)} {p.coin}</span>
+                          </div>
+                          <div className="flex justify-between text-xs font-mono">
+                            <span className="text-text-muted">入场价:</span>
+                            <span className="text-text-main">{isNaN(entryPx) ? '—' : entryPx.toLocaleString()}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-sm font-mono pt-2 border-t border-border-subtle/50">
+                            <span className="text-text-muted">未实现盈亏:</span>
+                            <span className={pnl >= 0 ? 'text-kline-up' : 'text-kline-down'}>
+                              {pnl > 0 ? '+' : ''}{isNaN(pnl) ? '—' : pnl.toFixed(2)} USDT
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
-                {!hlPosition && (
+                {hlPositions === null && (
                    <p className="text-xs text-text-muted mt-2">请先在右上角设置中配置 API 以获取链上状态。</p>
                 )}
               </div>
@@ -1110,7 +1326,7 @@ export default function Home() {
                   <div className="pt-1">
                      <label className="text-sm text-text-muted block mb-1 flex justify-between">
                         <span>远端网格递增 (马丁格尔)</span>
-                        <span className="font-mono text-fib-a">+{depthScale * 100}%/层</span>
+                        <span className="font-mono text-fib-a">+{Math.round(depthScale * 100)}%/层</span>
                      </label>
                      <input type="range" min="0" max="2.0" step="0.1" value={depthScale}
                        onChange={e => setDepthScale(Number(e.target.value))} className="w-full accent-fib-a" />
@@ -1203,11 +1419,46 @@ export default function Home() {
                     return (
                     <div key={i} className={`p-2 rounded-md border transition-colors text-xs font-mono group ${belowMin ? 'bg-kline-down/5 border-kline-down/40' : m.active ? 'bg-bg-card border-border-subtle hover:border-text-muted' : 'bg-bg-main border-border-subtle/30 opacity-50'}`}>
                       <div className="flex justify-between items-center mb-1">
-                        <label className="flex items-center space-x-2 cursor-pointer">
+                        <div className="flex items-center space-x-2">
                           <input type="checkbox" checked={m.active} onChange={() => toggleOrderActive(i)}
-                            className="rounded border-border-subtle text-fib-a focus:ring-fib-a bg-bg-main w-3.5 h-3.5" />
-                          <span className={`font-bold text-sm ${m.active ? 'text-text-main' : 'text-text-muted line-through'}`}>${m.price.toFixed(1)}</span>
-                        </label>
+                            className="rounded border-border-subtle text-fib-a focus:ring-fib-a bg-bg-main w-3.5 h-3.5 cursor-pointer" />
+                          {editingPriceIndex === i ? (
+                            <input
+                              type="text"
+                              autoFocus
+                              value={priceDraft}
+                              onChange={(e) => setPriceDraft(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') commitOrderPrice(i, priceDraft);
+                                else if (e.key === 'Escape') setEditingPriceIndex(-1);
+                              }}
+                              onBlur={() => commitOrderPrice(i, priceDraft)}
+                              className="bg-bg-main border border-fib-a rounded px-1 py-0.5 w-24 outline-none text-sm font-bold font-mono text-text-main"
+                            />
+                          ) : (
+                            <>
+                              <span className={`font-bold text-sm ${m.active ? (m.isManualPrice ? 'text-fib-a' : 'text-text-main') : 'text-text-muted line-through'}`}>${m.price.toFixed(1)}</span>
+                              <button
+                                type="button"
+                                onClick={() => { setPriceDraft(m.price.toFixed(1)); setEditingPriceIndex(i); }}
+                                title="编辑价格"
+                                className="text-text-muted/50 hover:text-fib-a transition-colors opacity-0 group-hover:opacity-100"
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </button>
+                              {m.isManualPrice && (
+                                <button
+                                  type="button"
+                                  onClick={() => resetOrderPrice(i)}
+                                  title={`恢复默认价 $${m.origPrice.toFixed(1)}`}
+                                  className="text-fib-a/70 hover:text-fib-a transition-colors"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                </button>
+                              )}
+                            </>
+                          )}
+                        </div>
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold tracking-widest ${m.side === 'Buy' ? 'bg-kline-up/20 text-kline-up' : 'bg-kline-down/20 text-kline-down'}`}>{m.side === 'Buy' ? '买入' : '卖出'}</span>
                       </div>
                       <div className={`flex justify-between items-center transition-opacity ${m.active ? 'opacity-80 group-hover:opacity-100' : 'opacity-40 pointer-events-none'}`}>
@@ -1395,6 +1646,106 @@ export default function Home() {
                   <AlertCircle className="w-3 h-3 mr-1.5 shrink-0" />{cancelResult.msg}
                 </div>
               )}
+            </div>
+          )}
+
+          {sidebarTab === 'balance' && (
+            <div className="flex-1 flex flex-col overflow-hidden bg-bg-main">
+              <div className="px-3 pt-3 pb-2 shrink-0 border-b border-border-subtle/50 flex items-center justify-between">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted flex items-center">
+                  <DollarSign className="w-4 h-4 mr-2 text-fib-a"/>
+                  余额快照
+                  <span className="ml-1.5 font-mono normal-case text-[10px] opacity-70">(USDC / 含浮盈 / 每 24h 自动追加)</span>
+                </h3>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (!accountValue || accountValue <= 0) {
+                        alert('尚未获取到账户余额，请稍候');
+                        return;
+                      }
+                      const now = Date.now();
+                      const history = balanceHistoryRef.current;
+                      const last = history[history.length - 1];
+                      const ts = last && last.ts >= now ? last.ts + 1 : now;
+                      const next = [...history, { ts, value: accountValue }];
+                      balanceHistoryRef.current = next;
+                      setBalanceHistory(next);
+                      try { localStorage.setItem('balanceHistory', JSON.stringify(next)); } catch {}
+                    }}
+                    className="text-xs font-mono border border-fib-a/50 text-fib-a hover:bg-fib-a/10 rounded px-2 py-1 transition-colors"
+                  >
+                    立即快照
+                  </button>
+                  {balanceHistory.length > 0 && (
+                    <button
+                      onClick={() => {
+                        if (!confirm('确认清空所有余额历史？')) return;
+                        balanceHistoryRef.current = [];
+                        setBalanceHistory([]);
+                        try { localStorage.removeItem('balanceHistory'); } catch {}
+                      }}
+                      className="text-xs font-mono border border-border-subtle hover:border-kline-down text-text-muted hover:text-kline-down rounded px-2 py-1 transition-colors"
+                    >
+                      清空
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-3 custom-scrollbar">
+                {balanceHistory.length === 0 ? (
+                  <div className="text-text-muted text-xs text-center py-6 font-mono">
+                    暂无记录
+                    <br /><span className="text-[10px] opacity-60">首次拉取账户余额后会自动记录一条</span>
+                  </div>
+                ) : (
+                  <table className="w-full text-sm font-mono">
+                    <thead>
+                      <tr className="text-[10px] font-bold uppercase tracking-widest text-text-muted/70 border-b border-border-subtle/50">
+                        <th className="text-left py-1.5 pl-1">日期</th>
+                        <th className="text-right py-1.5">余额 (USDC)</th>
+                        <th className="text-right py-1.5">Δ %</th>
+                        <th className="py-1.5 pr-1 w-8"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...balanceHistory].reverse().map((entry, idx, arr) => {
+                        const prev = arr[idx + 1];
+                        const pct = prev ? ((entry.value - prev.value) / prev.value) * 100 : null;
+                        const d = new Date(entry.ts);
+                        const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                        return (
+                          <tr key={entry.ts} className="border-b border-border-subtle/30 hover:bg-bg-card/40 group">
+                            <td className="text-left py-2 pl-1 text-text-main">{dateStr}</td>
+                            <td className="text-right py-2 text-text-main">{entry.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className={`text-right py-2 ${pct === null ? 'text-text-muted' : pct >= 0 ? 'text-kline-up' : 'text-kline-down'}`}>
+                              {pct === null ? '—' : `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`}
+                            </td>
+                            <td className="py-2 pr-1 text-right">
+                              <button
+                                onClick={() => {
+                                  const next = balanceHistoryRef.current.filter(e => e.ts !== entry.ts);
+                                  balanceHistoryRef.current = next;
+                                  setBalanceHistory(next);
+                                  try {
+                                    if (next.length === 0) localStorage.removeItem('balanceHistory');
+                                    else localStorage.setItem('balanceHistory', JSON.stringify(next));
+                                  } catch {}
+                                }}
+                                title="删除该条记录"
+                                className="text-text-muted/40 hover:text-kline-down text-xs opacity-0 group-hover:opacity-100 transition-opacity px-1"
+                              >
+                                ✕
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             </div>
           )}
 

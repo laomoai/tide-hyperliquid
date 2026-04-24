@@ -49,16 +49,14 @@ function isDeployOrder(order: unknown): order is DeployOrder {
   if (!order || typeof order !== 'object') return false;
   const c = order as Partial<DeployOrder>;
   return (
-    (c.coin === 'BTC-PERP' || c.coin === 'BTC') &&
+    typeof c.coin === 'string' && c.coin.length > 0 &&
     typeof c.is_buy === 'boolean' &&
     typeof c.sz === 'number' &&
     Number.isFinite(c.sz) &&
-    c.sz >= 0.001 &&
-    Math.round(c.sz * 1000) === c.sz * 1000 &&
+    c.sz > 0 &&
     typeof c.limit_px === 'number' &&
     Number.isFinite(c.limit_px) &&
     c.limit_px > 0 &&
-    Number.isInteger(c.limit_px) &&
     typeof c.reduce_only === 'boolean' &&
     c.order_type?.limit?.tif === 'Gtc'
   );
@@ -168,7 +166,7 @@ export async function POST(req: NextRequest) {
     const orderWires: OrderWire[] = (orders as DeployOrder[]).map(o => ({
       a: resolvedAssetIndex,
       b: o.is_buy,
-      p: String(Math.round(o.limit_px)),
+      p: String(o.limit_px),
       s: o.sz.toFixed(resolvedSzDecimals).replace(/\.?0+$/, ''),
       r: o.reduce_only,
       t: o.order_type,
