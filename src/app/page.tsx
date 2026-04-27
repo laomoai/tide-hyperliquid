@@ -1176,7 +1176,7 @@ export default function Home() {
               onClick={() => { setSidebarTab('orders'); }}
               className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'orders' ? 'text-yellow-500 border-b-2 border-yellow-500' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
             >
-              <Zap className="w-4 h-4 fill-current" /> 部署订单
+              <Zap className="w-4 h-4 fill-current" /> 建议
               {matrix.filter(m => m.active).length > 0 && (
                 <span className="ml-1 px-1.5 py-0.5 rounded-full bg-yellow-500/20 text-yellow-500 text-xs font-bold">{matrix.filter(m => m.active).length}</span>
               )}
@@ -1185,7 +1185,7 @@ export default function Home() {
               onClick={() => { setSidebarTab('openOrders'); fetchOpenOrders(); }}
               className={`flex-1 py-2.5 text-sm font-bold uppercase tracking-wider transition-colors flex items-center justify-center gap-1.5 ${sidebarTab === 'openOrders' ? 'text-fib-a border-b-2 border-fib-a' : 'text-text-muted hover:text-text-main border-b-2 border-transparent'}`}
             >
-              <Check className="w-4 h-4" /> 现有订单
+              <Check className="w-4 h-4" /> 挂单
               {openOrders.length > 0 && (
                 <span className="ml-1 px-1.5 py-0.5 rounded-full bg-fib-a/20 text-fib-a text-xs font-bold">{openOrders.length}</span>
               )}
@@ -1390,7 +1390,7 @@ export default function Home() {
                 <div className="px-3 pt-3 pb-2 shrink-0 z-10 bg-bg-main border-b border-border-subtle/50">
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-xs font-bold uppercase tracking-wider text-text-muted flex items-center">
-                      <Zap className="w-4 h-4 mr-2 text-yellow-500 fill-current"/> 部署订单 (草稿)
+                      <Zap className="w-4 h-4 mr-2 text-yellow-500 fill-current"/> 建议 (草稿)
                     </h3>
                   </div>
                   {matrix.length > 0 && (
@@ -1505,7 +1505,7 @@ export default function Home() {
                      ${isDeploying || matrix.filter(m => m.active).length === 0 || matrix.some(m => { const lot = coinMetaMap[activeCoin] ? Math.pow(10, -coinMetaMap[activeCoin].szDecimals) : 0.001; return m.active && (parseFloat(m.sizeStr) || 0) < lot; }) ? 'bg-bg-main text-text-muted border border-border-subtle cursor-not-allowed' : 'bg-fib-a hover:bg-fib-a/90 text-white'}
                    `}>
                     {isDeploying ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Zap className="w-4 h-4 mr-2 fill-current"/>}
-                    {isDeploying ? '正在计算 L1 签名并部署...' : '⚡ 一键部署限价单'}
+                    {isDeploying ? '正在计算 L1 签名并部署...' : '⚡ 挂单到HyperLiquid'}
                  </button>
                  {deployResult && (
                    <div className={`mt-3 p-2 rounded text-xs flex items-center font-mono ${deployResult.status === 'success' ? 'bg-kline-up/10 text-kline-up border border-kline-up/20' : 'bg-kline-down/10 text-kline-down border border-kline-down/20'}`}>
