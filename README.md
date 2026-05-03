@@ -1,6 +1,6 @@
 # Tide × HyperLiquid
 
-BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场，自动计算多时间框架斐波那契共振区间，生成加权订单矩阵并一键部署限价单。
+BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场，自动计算多时间框架斐波那契共振区间，生成加权订单建议并一键挂单到 HyperLiquid。
 
 **在线地址：** [tide.lemoai.xyz](https://tide.lemoai.xyz)  
 **开源地址：** [github.com/laomoai/tide-hyperliquid](https://github.com/laomoai/tide-hyperliquid)
@@ -22,7 +22,7 @@ BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场�
 - 两组斐波那契位叠加显示在 K 线图上，可分别独立开关
 - 高低点回溯深度可在设置页面配置（默认 89 根 K 线，支持改为 55 / 144 等）
 
-### 订单矩阵生成
+### 订单建议生成
 - 将距离相近的斐波那契位（默认容差 0.5%）聚合为一个价格簇
 - 1D 斐波那契位权重为 2（两个时间框架共振），4H 单独位权重为 1
 - 深度加权（Depth Scale）：离当前价格越远的订单，分配比例越高
@@ -30,7 +30,7 @@ BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场�
 - 总仓位按权重比例分配到各簇，自动换算为对应币种数量
 - 数量可手动改写；价格可点铅笔图标手动改写，改价后自动重判 Buy/Sell 并同步图表标线，一键「恢复默认」回到生成价
 
-### 一键部署限价单
+### 挂单到 HyperLiquid
 - 使用 HyperLiquid API Wallet（Agent 钱包）签名，私钥不离开本地
 - 在浏览器端将私钥和 Master 地址发送到 `/api/deploy`（自建 Edge Function），由服务端完成 EIP-712 签名并提交到 HyperLiquid L1
 - 支持批量下单（最多 50 单）、最小下单量校验、价格整数校验（tick size = $1）
@@ -154,7 +154,7 @@ npm run pages:deploy
 
 ---
 
-## 订单矩阵选择快捷键
+## 订单建议选择快捷键
 
 | 按钮 | 效果 |
 |------|------|
