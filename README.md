@@ -2,7 +2,18 @@
 
 BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场，自动计算多时间框架斐波那契共振区间，生成加权订单矩阵并一键部署限价单。
 
-**在线地址：** [tide.lemoai.xyz](https://tide.lemoai.xyz)
+**在线地址：** [tide.lemoai.xyz](https://tide.lemoai.xyz)  
+**开源地址：** [github.com/laomoai/tide-hyperliquid](https://github.com/laomoai/tide-hyperliquid)
+
+---
+
+## 灵感与致谢
+
+本项目的核心交易思路来自 **[Pauiwei（@coolish）](https://x.com/coolish)**。
+
+Pauiwei 是一位深度研究斐波那契与市场结构的交易者，他分享的多时间框架斐波那契共振方法和网格布局思路直接启发了这个工具的诞生。没有他公开的交易方法和无私的知识分享，就没有 Tide 这个项目。
+
+感谢 Pauiwei！🙏
 
 ---
 
@@ -34,6 +45,12 @@ BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场�
 - 网格背景线开关
 - 亮色 / 暗色主题
 - 当前交易对若持有仓位，图表以金黄色虚线标出入场价
+- 画线工具：支持射线绘制、磁吸高低点、单独拖拽/删除
+
+### 魏神挂单监控
+- 一键展示任意 HyperLiquid 地址的挂单情况，以橙色水平线标注在图表上
+- 默认监控 Pauiwei 的地址，可修改为任意地址
+- 每 30 秒自动刷新
 
 ### 全局持仓
 - 侧边栏「参数」tab 列出 HyperLiquid 账户下全部永续持仓，非当前交易对也一并展示
@@ -59,7 +76,7 @@ BTC-PERP 斐波那契网格交易终端，基于 HyperLiquid 永续合约市场�
 ### 本地运行
 
 ```bash
-git clone <repo>
+git clone https://github.com/laomoai/tide-hyperliquid.git
 cd src
 npm install
 npm run dev
@@ -139,3 +156,9 @@ npm run pages:deploy
 | ★ | 仅勾选单时间框架 4H 位（较弱共振） |
 | ★★ | 仅勾选单时间框架 1D 位（中等共振） |
 | ★★★ | 仅勾选 1D + 4H 双重共振位（最强支撑/阻力） |
+
+---
+
+## License
+
+MIT

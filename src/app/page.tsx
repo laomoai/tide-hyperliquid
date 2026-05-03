@@ -125,6 +125,14 @@ function generateMatrix(fibs1D: number[], fibs4H: number[], currentPrice: number
   }).sort((a, b) => b.price - a.price);
 }
 
+function pointToSegmentDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  if (len2 === 0) return Math.hypot(px - x1, py - y1);
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / len2));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+
 export default function Home() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -152,6 +160,26 @@ export default function Home() {
   const [showFibB, setShowFibB] = useState(true);
   const [showGrid, setShowGrid] = useState(false);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+
+  // Drawing Tool State
+  type TrendLinePoint = { time: number; price: number };
+  type TrendLine = { id: number; p1: TrendLinePoint; p2: TrendLinePoint };
+  const [drawingMode, setDrawingMode] = useState<'none' | 'ray'>('none');
+  const drawingModeRef = useRef<'none' | 'ray'>('none');
+  const [trendLines, setTrendLines] = useState<TrendLine[]>([]);
+  const trendLinesRef = useRef<TrendLine[]>([]);
+  const pendingPointRef = useRef<TrendLinePoint | null>(null);
+  const [hasPendingPoint, setHasPendingPoint] = useState(false);
+  const trendLineIdRef = useRef(0);
+  const [, setRenderTick] = useState(0);
+  const [magnetPoint, setMagnetPoint] = useState<TrendLinePoint | null>(null);
+  const magnetPointRef = useRef<TrendLinePoint | null>(null);
+  const [magnetEnabled, setMagnetEnabled] = useState(true);
+  const magnetEnabledRef = useRef(true);
+  const [selectedLineId, setSelectedLineId] = useState<number | null>(null);
+  const selectedLineIdRef = useRef<number | null>(null);
+  const draggingRef = useRef<{ lineId: number; point: 'p1' | 'p2' } | null>(null);
+  const chartDataRef = useRef<any[]>([]);
 
   // Strategy Panel States
   // null = 加载中；[] = 无持仓；非空数组 = 持仓列表
@@ -193,6 +221,16 @@ export default function Home() {
   const [selectedOrderIds, setSelectedOrderIds] = useState<Set<number>>(new Set());
   const [isCanceling, setIsCanceling] = useState(false);
   const [cancelResult, setCancelResult] = useState<{status: 'success' | 'err', msg: string} | null>(null);
+
+  // 魏神挂单
+  const [showWeiOrders, setShowWeiOrders] = useState(false);
+  const [weiAddress, setWeiAddress] = useState('0xdAe4DF7207feB3B350e4284C8eFe5f7DAc37f637');
+  const [weiOrders, setWeiOrders] = useState<any[]>([]);
+  const weiOrderLinesRef = useRef<IPriceLine[]>([]);
+  const [editingWeiAddress, setEditingWeiAddress] = useState(false);
+  const [weiAddressDraft, setWeiAddressDraft] = useState('');
+  const [weiPopupPos, setWeiPopupPos] = useState<{ top: number; left: number } | null>(null);
+  const weiButtonGroupRef = useRef<HTMLDivElement>(null);
 
   const orderKey = (price: number) => price.toFixed(8);
 
@@ -434,7 +472,7 @@ export default function Home() {
       const typeZh = triggerPx > 0 ? (o.triggerCondition === 'above' ? '止盈' : '止损') : '限价';
       const line = seriesRef.current!.createPriceLine({
         price: px,
-        color: '#1E3A5F',
+        color: '#2196F3',
         lineWidth: 1,
         lineStyle: 3,
         axisLabelVisible: true,
@@ -467,6 +505,42 @@ export default function Home() {
       axisLabelTextColor: '#000000',
       title: `● ${isLong ? '多' : '空'} ${Math.abs(szi)}`,
     });
+  };
+
+  const drawWeiOrderLines = (orders: any[], coin: string, show: boolean) => {
+    if (!seriesRef.current) return;
+    weiOrderLinesRef.current.forEach(line => seriesRef.current?.removePriceLine(line));
+    weiOrderLinesRef.current = [];
+    if (!show || orders.length === 0) return;
+    const matched = orders.filter((o: any) => o.coin === coin || o.coin === `${coin}-PERP`);
+    matched.forEach((o: any) => {
+      const triggerPx = parseFloat(o.triggerPx ?? '0');
+      const px = triggerPx > 0 ? triggerPx : parseFloat(o.limitPx);
+      if (isNaN(px) || px <= 0) return;
+      const isBuy = o.side === 'B';
+      const line = seriesRef.current!.createPriceLine({
+        price: px,
+        color: '#F97316',
+        lineWidth: 1,
+        lineStyle: 0,
+        axisLabelVisible: true,
+        axisLabelTextColor: '#FFFFFF',
+        title: `魏 ${isBuy ? '买' : '卖'} ${o.sz}`,
+      });
+      weiOrderLinesRef.current.push(line);
+    });
+  };
+
+  const fetchWeiOrders = async (addr: string) => {
+    try {
+      const res = await fetch(HL_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'openOrders', user: addr }),
+      });
+      const data = await res.json();
+      setWeiOrders(Array.isArray(data) ? data : []);
+    } catch {}
   };
 
   const fetchOpenOrders = async () => {
@@ -730,6 +804,101 @@ export default function Home() {
     emaSeriesRef.current = emaSeries;
     drawOpenOrderLines(openOrdersRef.current, activeCoinRef.current);
     drawPositionLine(hlPositionsRef.current, activeCoinRef.current);
+    drawWeiOrderLines(weiOrders, activeCoinRef.current, showWeiOrders);
+
+    // Drawing tool: capture chart clicks
+    chart.subscribeClick((param) => {
+      if (drawingModeRef.current === 'none') {
+        // Selection mode: hit test existing lines
+        if (!param.point) { setSelectedLineId(null); selectedLineIdRef.current = null; return; }
+        const cx = param.point.x, cy = param.point.y;
+        const w = chartContainerRef.current?.clientWidth ?? 1000;
+        for (const line of trendLinesRef.current) {
+          const c1x = chartRef.current?.timeScale().timeToCoordinate(line.p1.time as Time);
+          const c1y = seriesRef.current?.priceToCoordinate(line.p1.price);
+          const c2x = chartRef.current?.timeScale().timeToCoordinate(line.p2.time as Time);
+          const c2y = seriesRef.current?.priceToCoordinate(line.p2.price);
+          if (c1x == null || c1y == null || c2x == null || c2y == null) continue;
+          let ex2 = Number(c2x), ey2 = Number(c2y);
+          const nx1 = Number(c1x), ny1 = Number(c1y);
+          if (ex2 !== nx1) {
+            const slope = (ey2 - ny1) / (ex2 - nx1);
+            const ex = ex2 > nx1 ? w : 0;
+            ey2 = ny1 + slope * (ex - nx1); ex2 = ex;
+          }
+          if (pointToSegmentDist(cx, cy, nx1, ny1, ex2, ey2) < 6) {
+            setSelectedLineId(line.id); selectedLineIdRef.current = line.id; return;
+          }
+        }
+        setSelectedLineId(null); selectedLineIdRef.current = null;
+        return;
+      }
+      // Drawing mode
+      if (!param.point || !param.time) return;
+      const snapped = magnetPointRef.current;
+      let price: number;
+      let timeNum: number;
+      if (snapped) {
+        price = snapped.price; timeNum = snapped.time;
+      } else {
+        const rawPrice = series.coordinateToPrice(param.point.y);
+        if (rawPrice === null) return;
+        price = rawPrice; timeNum = typeof param.time === 'number' ? param.time : 0;
+      }
+      if (!pendingPointRef.current) {
+        pendingPointRef.current = { time: timeNum, price };
+        setHasPendingPoint(true);
+      } else {
+        const p1 = pendingPointRef.current;
+        pendingPointRef.current = null;
+        setHasPendingPoint(false);
+        trendLineIdRef.current++;
+        setTrendLines(prev => { const next = [...prev, { id: trendLineIdRef.current, p1, p2: { time: timeNum, price } }]; trendLinesRef.current = next; return next; });
+      }
+    });
+
+    // Crosshair move: magnet snap (H/L only) + preview line re-render
+    let rafMagnet: number | null = null;
+    chart.subscribeCrosshairMove((param) => {
+      if (drawingModeRef.current === 'none') { magnetPointRef.current = null; return; }
+      if (rafMagnet !== null) return;
+      rafMagnet = requestAnimationFrame(() => {
+        rafMagnet = null;
+        if (!param.point || !param.time) { magnetPointRef.current = null; setMagnetPoint(null); return; }
+        const rawTime = typeof param.time === 'number' ? param.time : 0;
+        let price = series.coordinateToPrice(param.point.y);
+        if (price === null) { magnetPointRef.current = null; setMagnetPoint(null); return; }
+
+        // Magnet: snap to H or L only, when enabled
+        if (magnetEnabledRef.current) {
+          const candle = chartDataRef.current.find(c => Number(c.time) === rawTime);
+          if (candle) {
+            let nearestPrice = price, nearestDist = Infinity;
+            for (const v of [candle.high, candle.low]) {
+              const vPx = series.priceToCoordinate(v);
+              if (vPx !== null) {
+                const dist = Math.abs(Number(vPx) - param.point.y);
+                if (dist < nearestDist) { nearestDist = dist; nearestPrice = v; }
+              }
+            }
+            if (nearestDist <= 10) price = nearestPrice;
+          }
+        }
+
+        const pt = { time: rawTime, price };
+        const prev = magnetPointRef.current;
+        if (!prev || prev.time !== rawTime || prev.price !== price) {
+          magnetPointRef.current = pt; setMagnetPoint(pt);
+        }
+      });
+    });
+
+    // Re-render SVG overlay when chart is scrolled or zoomed
+    let rafId: number | null = null;
+    chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => { setRenderTick(t => t + 1); rafId = null; });
+    });
 
     const handleResize = () => {
       if (chartContainerRef.current && chartRef.current) {
@@ -758,6 +927,7 @@ export default function Home() {
       emaSeriesRef.current = null;
       positionLineRef.current = null;
       openOrderLinesRef.current = [];
+      weiOrderLinesRef.current = [];
       matrixLinesRef.current = [];
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -892,6 +1062,45 @@ export default function Home() {
       });
     }
   }, [chartData]);
+
+  // Keep chartDataRef in sync for magnet snapping
+  useEffect(() => {
+    if (chartData) chartDataRef.current = chartData;
+  }, [chartData]);
+
+  // Keep trendLinesRef in sync for hit testing in chart event handlers
+  useEffect(() => { trendLinesRef.current = trendLines; }, [trendLines]);
+
+  // 魏神挂单：fetch + 定时刷新
+  useEffect(() => {
+    if (!showWeiOrders) {
+      drawWeiOrderLines([], activeCoin, false);
+      return;
+    }
+    fetchWeiOrders(weiAddress);
+    const timer = setInterval(() => fetchWeiOrders(weiAddress), 30_000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showWeiOrders, weiAddress]);
+
+  // 魏神挂单：绘制（当数据或 coin 变化时）
+  useEffect(() => {
+    drawWeiOrderLines(weiOrders, activeCoin, showWeiOrders);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [weiOrders, activeCoin, showWeiOrders]);
+
+  // Keyboard Delete/Backspace to remove selected line
+  useEffect(() => {
+    if (selectedLineId === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      setTrendLines(prev => { const next = prev.filter(l => l.id !== selectedLineId); trendLinesRef.current = next; return next; });
+      setSelectedLineId(null); selectedLineIdRef.current = null;
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedLineId]);
 
   const getVisualParams = () => {
     if (typeof window !== 'undefined') {
@@ -1052,6 +1261,40 @@ export default function Home() {
         </div>
 
         <div className="flex items-center space-x-3 lg:space-x-6">
+          {/* 魏神挂单开关 */}
+          <div ref={weiButtonGroupRef} className="relative flex items-center gap-1.5">
+            <a
+              href="https://x.com/coolish"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-text-muted/50 hover:text-text-muted transition-colors"
+              title="@coolish on X"
+            >
+              <svg viewBox="0 0 24 24" className="w-3 h-3 fill-current" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.746l7.73-8.835L1.254 2.25H8.08l4.261 5.632 5.903-5.632Zm-1.161 17.52h1.833L7.084 4.126H5.117Z"/></svg>
+            </a>
+            <button
+              onClick={() => setShowWeiOrders(s => !s)}
+              className={`text-[10px] lg:text-[11px] font-mono px-2 py-0.5 rounded border transition-colors ${showWeiOrders ? 'bg-orange-500/20 border-orange-500/60 text-orange-400' : 'border-border-subtle text-text-muted hover:text-text-main hover:border-text-muted'}`}
+              title={`魏神挂单 (${weiAddress.slice(0, 6)}...${weiAddress.slice(-4)})`}
+            >
+              魏神挂单
+            </button>
+            {showWeiOrders && (
+              <button
+                onClick={() => {
+                  const rect = weiButtonGroupRef.current?.getBoundingClientRect();
+                  if (rect) setWeiPopupPos({ top: rect.bottom + 8, left: rect.left });
+                  setEditingWeiAddress(true);
+                  setWeiAddressDraft(weiAddress);
+                }}
+                className="text-text-muted/50 hover:text-text-muted transition-colors"
+                title="修改监控地址"
+              >
+                <Pencil size={11} />
+              </button>
+            )}
+          </div>
+
           <label className="group flex items-center space-x-2 cursor-pointer select-none">
             <div className="relative flex items-center justify-center">
               <input type="checkbox" checked={showFibA} onChange={() => setShowFibA(!showFibA)} className="sr-only" />
@@ -1090,12 +1333,52 @@ export default function Home() {
             {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
           </button>
 
+          <a
+            href="https://github.com/laomoai/tide-hyperliquid"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-1.5 rounded-md border border-border-subtle hover:bg-border-subtle text-text-muted hover:text-text-main transition-colors"
+            title="开源地址 GitHub"
+          >
+            <svg viewBox="0 0 24 24" className="w-[15px] h-[15px] fill-current" aria-hidden="true"><path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.342-3.369-1.342-.454-1.155-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0 1 12 6.836a9.59 9.59 0 0 1 2.504.337c1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.741 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/></svg>
+          </a>
+
           <Link href="/settings" className="p-1.5 rounded-md border border-border-subtle hover:bg-border-subtle text-text-muted hover:text-text-main transition-colors" title="系统设置">
             <SettingsIcon size={15} />
           </Link>
         </div>
       </header>
-      
+
+      {/* 魏神挂单地址编辑弹窗 — fixed 避免被 header 遮挡 */}
+      {editingWeiAddress && (
+        <>
+          <div className="fixed inset-0 z-[90]" onClick={() => setEditingWeiAddress(false)} />
+          <div
+            className="fixed z-[100] bg-bg-card border border-border-subtle rounded-lg p-3 shadow-2xl flex flex-col gap-2 w-96"
+            style={weiPopupPos ? { top: weiPopupPos.top, left: weiPopupPos.left } : { top: 64, left: 16 }}
+          >
+            <span className="text-[9px] uppercase tracking-widest text-text-muted font-mono">监控地址</span>
+            <input
+              value={weiAddressDraft}
+              onChange={e => setWeiAddressDraft(e.target.value)}
+              className="text-[11px] font-mono w-full bg-bg-main border border-border-subtle rounded px-2 py-1.5 text-text-main focus:outline-none focus:border-orange-500/60"
+              placeholder="0x..."
+              autoFocus
+            />
+            <div className="flex gap-1.5">
+              <button
+                onClick={() => { setWeiAddress(weiAddressDraft); setEditingWeiAddress(false); }}
+                className="flex-1 text-[10px] py-1 bg-orange-500/20 text-orange-400 rounded border border-orange-500/40 hover:bg-orange-500/30 transition-colors font-mono"
+              >确定</button>
+              <button
+                onClick={() => setEditingWeiAddress(false)}
+                className="text-[10px] px-3 py-1 text-text-muted border border-border-subtle rounded hover:text-text-main transition-colors font-mono"
+              >取消</button>
+            </div>
+          </div>
+        </>
+      )}
+
       <div className="bg-bg-card border-b border-border-subtle flex items-center px-4 text-[11px] font-mono text-text-muted z-10 relative transition-colors duration-200 shrink-0">
         {intervals.map((inv) => (
           <button
@@ -1110,13 +1393,88 @@ export default function Home() {
             {inv.label}
           </button>
         ))}
+        <span className="mx-2 text-border-subtle select-none">|</span>
+        <button
+          onClick={() => {
+            const next = drawingMode === 'ray' ? 'none' : 'ray';
+            setDrawingMode(next); drawingModeRef.current = next;
+            pendingPointRef.current = null; setHasPendingPoint(false);
+            setSelectedLineId(null); selectedLineIdRef.current = null;
+            if (next === 'none') { magnetPointRef.current = null; setMagnetPoint(null); }
+          }}
+          className={`px-3 py-1.5 border rounded transition-colors ${drawingMode === 'ray' ? 'text-yellow-400 border-yellow-400/60 bg-yellow-400/10' : 'border-border-subtle hover:text-text-main hover:border-text-muted'}`}
+          title="画线（点击两点延伸射线）"
+        >
+          画线
+        </button>
+        <button
+          onClick={() => { setMagnetEnabled(e => !e); magnetEnabledRef.current = !magnetEnabledRef.current; }}
+          className={`ml-1.5 px-2 py-1.5 border rounded transition-colors text-[13px] ${magnetEnabled ? 'text-blue-400 border-blue-400/60 bg-blue-400/10' : 'border-border-subtle text-text-muted hover:text-text-main'}`}
+          title={`磁吸高低点（当前：${magnetEnabled ? '开' : '关'}）`}
+        >
+          🧲
+        </button>
+        {selectedLineId !== null && drawingMode === 'none' && (
+          <button
+            onClick={() => {
+              setTrendLines(prev => { const next = prev.filter(l => l.id !== selectedLineId); trendLinesRef.current = next; return next; });
+              setSelectedLineId(null); selectedLineIdRef.current = null;
+            }}
+            className="ml-1.5 px-2 py-1 text-[10px] text-red-400 hover:text-red-300 border border-red-400/50 hover:border-red-400 rounded transition-colors"
+            title="删除选中画线"
+          >
+            删除
+          </button>
+        )}
+        {trendLines.length > 0 && selectedLineId === null && (
+          <button
+            onClick={() => { setTrendLines([]); trendLinesRef.current = []; pendingPointRef.current = null; setHasPendingPoint(false); setSelectedLineId(null); }}
+            className="ml-1.5 px-2 py-1 text-[10px] text-text-muted hover:text-red-400 border border-border-subtle hover:border-red-400/50 rounded transition-colors"
+            title="清除所有画线"
+          >
+            清除全部
+          </button>
+        )}
       </div>
 
       {/* Main Content Layout */}
       <div className="flex-1 flex overflow-hidden">
         
         {/* Left: Chart Area */}
-        <main className="flex-1 relative overflow-hidden bg-bg-main h-full transition-colors duration-200">
+        <main
+          className="flex-1 relative overflow-hidden bg-bg-main h-full transition-colors duration-200"
+          onMouseMove={(e) => {
+            if (!draggingRef.current || !chartRef.current || !seriesRef.current) return;
+            const rect = chartContainerRef.current?.getBoundingClientRect();
+            if (!rect) return;
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const rawTime = chartRef.current.timeScale().coordinateToTime(x as any);
+            const rawPrice = seriesRef.current.coordinateToPrice(y);
+            if (rawTime === null || rawPrice === null) return;
+            const timeNum = typeof rawTime === 'number' ? rawTime : 0;
+            let price = rawPrice;
+            if (magnetEnabledRef.current) {
+              const candle = chartDataRef.current.find(c => Number(c.time) === timeNum);
+              if (candle) {
+                let nearestPrice = price, nearestDist = Infinity;
+                for (const v of [candle.high, candle.low]) {
+                  const vPx = seriesRef.current!.priceToCoordinate(v);
+                  if (vPx !== null) { const d = Math.abs(Number(vPx) - y); if (d < nearestDist) { nearestDist = d; nearestPrice = v; } }
+                }
+                if (nearestDist <= 10) price = nearestPrice;
+              }
+            }
+            const { lineId, point } = draggingRef.current;
+            setTrendLines(prev => {
+              const next = prev.map(l => l.id !== lineId ? l : { ...l, [point]: { time: timeNum, price } });
+              trendLinesRef.current = next; return next;
+            });
+            setRenderTick(t => t + 1);
+          }}
+          onMouseUp={() => { draggingRef.current = null; }}
+          onMouseLeave={() => { draggingRef.current = null; }}
+        >
           {loading && (
             <div className="absolute inset-0 flex items-center justify-center bg-bg-main/80 z-10 text-text-main font-medium tracking-wide">
               <div className="flex items-center space-x-3">
@@ -1136,7 +1494,100 @@ export default function Home() {
               </div>
             </div>
           )}
-          <div ref={chartContainerRef} className="absolute inset-0" />
+          <div ref={chartContainerRef} className="absolute inset-0" style={{ cursor: drawingMode !== 'none' ? 'crosshair' : undefined }} />
+
+          {/* SVG overlay for ray lines, preview, magnet indicator */}
+          <svg className="absolute inset-0 pointer-events-none" style={{ zIndex: 10 }} width="100%" height="100%">
+            {trendLines.map(line => {
+              if (!chartRef.current || !seriesRef.current) return null;
+              const c1x = chartRef.current.timeScale().timeToCoordinate(line.p1.time as Time);
+              const c1y = seriesRef.current.priceToCoordinate(line.p1.price);
+              const c2x = chartRef.current.timeScale().timeToCoordinate(line.p2.time as Time);
+              const c2y = seriesRef.current.priceToCoordinate(line.p2.price);
+              if (c1x === null || c1y === null || c2x === null || c2y === null) return null;
+              const x1 = Number(c1x), y1 = Number(c1y);
+              let x2 = Number(c2x), y2 = Number(c2y);
+              const w = chartContainerRef.current?.clientWidth ?? 1000;
+              if (x2 !== x1) {
+                const slope = (y2 - y1) / (x2 - x1);
+                const ex = x2 > x1 ? w : 0;
+                y2 = y1 + slope * (ex - x1); x2 = ex;
+              }
+              const isSelected = line.id === selectedLineId;
+              return (
+                <g key={line.id}>
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={isSelected ? '#FBBF24' : '#F59E0B'} strokeWidth={isSelected ? 2 : 1.5} />
+                  {isSelected && <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#FBBF24" strokeWidth="10" strokeOpacity="0" />}
+                </g>
+              );
+            })}
+            {/* Dashed preview line */}
+            {hasPendingPoint && pendingPointRef.current && magnetPoint && chartRef.current && seriesRef.current && (() => {
+              const c1x = chartRef.current!.timeScale().timeToCoordinate(pendingPointRef.current!.time as Time);
+              const c1y = seriesRef.current!.priceToCoordinate(pendingPointRef.current!.price);
+              const c2x = chartRef.current!.timeScale().timeToCoordinate(magnetPoint.time as Time);
+              const c2y = seriesRef.current!.priceToCoordinate(magnetPoint.price);
+              if (c1x === null || c1y === null || c2x === null || c2y === null) return null;
+              const x1 = Number(c1x), y1 = Number(c1y);
+              let x2 = Number(c2x), y2 = Number(c2y);
+              const w = chartContainerRef.current?.clientWidth ?? 1000;
+              if (x2 !== x1) {
+                const slope = (y2 - y1) / (x2 - x1);
+                const ex = x2 > x1 ? w : 0;
+                y2 = y1 + slope * (ex - x1); x2 = ex;
+              }
+              return <line key="preview" x1={x1} y1={y1} x2={x2} y2={y2} stroke="#F59E0B" strokeWidth="1" strokeDasharray="5 3" opacity="0.65" />;
+            })()}
+            {/* First point anchor */}
+            {hasPendingPoint && pendingPointRef.current && chartRef.current && seriesRef.current && (() => {
+              const px = chartRef.current!.timeScale().timeToCoordinate(pendingPointRef.current!.time as Time);
+              const py = seriesRef.current!.priceToCoordinate(pendingPointRef.current!.price);
+              if (px === null || py === null) return null;
+              return <circle key="anchor" cx={Number(px)} cy={Number(py)} r="4" fill="#F59E0B" fillOpacity="0.3" stroke="#F59E0B" strokeWidth="1.5" />;
+            })()}
+            {/* Magnet snap cursor */}
+            {drawingMode !== 'none' && magnetEnabled && magnetPoint && chartRef.current && seriesRef.current && (() => {
+              const mx = chartRef.current!.timeScale().timeToCoordinate(magnetPoint.time as Time);
+              const my = seriesRef.current!.priceToCoordinate(magnetPoint.price);
+              if (mx === null || my === null) return null;
+              return <circle key="magnet" cx={Number(mx)} cy={Number(my)} r="5" fill="none" stroke="#60A5FA" strokeWidth="1.5" opacity="0.9" />;
+            })()}
+          </svg>
+
+          {/* Drag handles + inline delete for selected line */}
+          {selectedLineId !== null && drawingMode === 'none' && (() => {
+            const line = trendLines.find(l => l.id === selectedLineId);
+            if (!line || !chartRef.current || !seriesRef.current) return null;
+            const c1x = chartRef.current.timeScale().timeToCoordinate(line.p1.time as Time);
+            const c1y = seriesRef.current.priceToCoordinate(line.p1.price);
+            const c2x = chartRef.current.timeScale().timeToCoordinate(line.p2.time as Time);
+            const c2y = seriesRef.current.priceToCoordinate(line.p2.price);
+            if (c1x === null || c1y === null || c2x === null || c2y === null) return null;
+            const x1 = Number(c1x), y1 = Number(c1y), x2 = Number(c2x), y2 = Number(c2y);
+            return (
+              <>
+                {/* p1 handle */}
+                <div className="absolute w-3 h-3 rounded-full border-2 border-yellow-300 bg-yellow-400 cursor-grab z-20"
+                  style={{ left: x1 - 6, top: y1 - 6, pointerEvents: 'auto' }}
+                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); draggingRef.current = { lineId: selectedLineId, point: 'p1' }; }}
+                />
+                {/* p2 handle */}
+                <div className="absolute w-3 h-3 rounded-full border-2 border-yellow-300 bg-yellow-400 cursor-grab z-20"
+                  style={{ left: x2 - 6, top: y2 - 6, pointerEvents: 'auto' }}
+                  onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); draggingRef.current = { lineId: selectedLineId, point: 'p2' }; }}
+                />
+                {/* Delete button near p1 */}
+                <div
+                  className="absolute z-20 flex items-center justify-center w-5 h-5 rounded-full bg-red-500 hover:bg-red-400 text-white text-[11px] leading-none cursor-pointer select-none"
+                  style={{ left: x1 - 10, top: y1 - 22, pointerEvents: 'auto' }}
+                  onClick={() => {
+                    setTrendLines(prev => { const next = prev.filter(l => l.id !== selectedLineId); trendLinesRef.current = next; return next; });
+                    setSelectedLineId(null); selectedLineIdRef.current = null;
+                  }}
+                >×</div>
+              </>
+            );
+          })()}
         </main>
 
         {/* Drag Handle */}
@@ -1573,10 +2024,22 @@ export default function Home() {
                   </div>
                 )}
                 {(() => {
-                  // 按 coin 分组
+                  // 按 coin 分组，每组内按价格从高到低排序
                   const coins = [...new Set(openOrders.map(o => o.coin))];
                   return coins.map(coin => {
-                    const coinOrders = openOrders.filter(o => o.coin === coin);
+                    const coinOrders = openOrders
+                      .filter(o => o.coin === coin)
+                      .sort((a, b) => {
+                        const pa = parseFloat(a.triggerPx && parseFloat(a.triggerPx) > 0 ? a.triggerPx : a.limitPx);
+                        const pb = parseFloat(b.triggerPx && parseFloat(b.triggerPx) > 0 ? b.triggerPx : b.limitPx);
+                        return pb - pa;
+                      });
+                    // 计算最大价值用于背景柱比例
+                    const maxVal = coinOrders.reduce((m, o) => {
+                      if (o.orderType && o.orderType !== 'Limit') return m;
+                      const v = parseFloat(o.sz) * parseFloat(o.limitPx);
+                      return isNaN(v) ? m : Math.max(m, v);
+                    }, 0);
                     return (
                       <div key={coin}>
                         <div className="text-[10px] font-bold uppercase tracking-widest text-text-muted/60 mb-1.5 mt-1 px-0.5">{coin}-PERP</div>
@@ -1586,6 +2049,7 @@ export default function Home() {
                             const isSelected = selectedOrderIds.has(order.oid);
                             const isTrigger = order.orderType && order.orderType !== 'Limit';
                             const usdVal = isTrigger ? null : (parseFloat(order.sz) * parseFloat(order.limitPx)).toFixed(0);
+                            const barPct = (!isTrigger && usdVal && maxVal > 0) ? Math.round(parseFloat(usdVal) / maxVal * 100) : 0;
                             return (
                               <div
                                 key={order.oid}
@@ -1594,9 +2058,14 @@ export default function Home() {
                                   isSelected ? next.delete(order.oid) : next.add(order.oid);
                                   return next;
                                 })}
-                                className={`p-2 rounded-md border transition-colors text-xs font-mono cursor-pointer ${isSelected ? 'bg-fib-a/10 border-fib-a/50' : 'bg-bg-card border-border-subtle hover:border-text-muted'}`}
+                                className={`relative overflow-hidden p-2 rounded-md border transition-colors text-xs font-mono cursor-pointer ${isSelected ? 'bg-fib-a/10 border-fib-a/50' : 'bg-bg-card border-border-subtle hover:border-text-muted'}`}
                               >
-                                <div className="flex justify-between items-center mb-1">
+                                {/* 价值背景柱 */}
+                                {barPct > 0 && (
+                                  <div className="absolute inset-y-0 left-0 pointer-events-none transition-all duration-300"
+                                    style={{ width: `${barPct}%`, backgroundColor: isBuy ? 'rgba(2,192,118,0.09)' : 'rgba(207,48,74,0.09)' }} />
+                                )}
+                                <div className="relative flex justify-between items-center mb-1">
                                   <div className="flex items-center gap-2">
                                     <input type="checkbox" readOnly checked={isSelected}
                                       className="rounded border-border-subtle text-fib-a bg-bg-main w-3.5 h-3.5 pointer-events-none" />
@@ -1610,7 +2079,7 @@ export default function Home() {
                                         )}
                                       </div>
                                     ) : (
-                                      <span className="font-bold text-sm text-text-main">${parseFloat(order.limitPx).toFixed(1)}</span>
+                                      <span className="font-bold text-xs text-text-main">${parseFloat(order.limitPx).toLocaleString('en-US', { maximumFractionDigits: 1 })}</span>
                                     )}
                                   </div>
                                   <div className="flex items-center gap-1.5">
@@ -1624,10 +2093,10 @@ export default function Home() {
                                     >取消</button>
                                   </div>
                                 </div>
-                                <div className="flex justify-between items-center text-text-muted">
-                                  <span>
-                                    {order.sz} {order.coin}
-                                    {usdVal && <span className="text-[9px]"> ≈${usdVal}</span>}
+                                <div className="relative flex justify-between items-center text-text-muted">
+                                  <span className="flex items-center gap-1.5">
+                                    <span>{order.sz} {order.coin}</span>
+                                    {usdVal && <span className="text-text-muted/60">≈${Number(usdVal).toLocaleString('en-US')}</span>}
                                   </span>
                                   <span className="text-[9px] opacity-60">{new Date(order.timestamp).toLocaleTimeString('zh-CN')}</span>
                                 </div>
