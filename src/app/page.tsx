@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { createChart, IChartApi, IPriceLine, ISeriesApi, Time, CandlestickSeries, LineSeries } from 'lightweight-charts';
+import { createChart, IChartApi, IPriceLine, ISeriesApi, ISeriesPrimitive, SeriesAttachedParameter, Time, CandlestickSeries, LineSeries } from 'lightweight-charts';
+import type { CanvasRenderingTarget2D } from 'fancy-canvas';
 import { Sun, Moon, Check, Zap, Wallet, BarChart, Settings as SettingsIcon, AlertCircle, Loader2, ChevronDown, DollarSign, Pencil, RotateCcw } from 'lucide-react';
 import Link from 'next/link';
 
@@ -125,6 +126,87 @@ function generateMatrix(fibs1D: number[], fibs4H: number[], currentPrice: number
   }).sort((a, b) => b.price - a.price);
 }
 
+// ─── Types shared between component and primitives ───────────────────────────
+type TrendLinePoint = { time: number; price: number };
+type TrendLine = { id: number; p1: TrendLinePoint; p2: TrendLinePoint };
+
+// ─── RayLine canvas primitive (ISeriesPrimitive) ──────────────────────────────
+class RayLinePaneRenderer {
+  private _p1: { x: number; y: number } | null;
+  private _p2: { x: number; y: number } | null;
+  private _selected: boolean;
+  constructor(p1: { x: number; y: number } | null, p2: { x: number; y: number } | null, selected: boolean) {
+    this._p1 = p1; this._p2 = p2; this._selected = selected;
+  }
+  draw(target: CanvasRenderingTarget2D): void {
+    if (!this._p1 || !this._p2) return;
+    const p1 = this._p1, p2 = this._p2, sel = this._selected;
+    target.useBitmapCoordinateSpace((scope) => {
+      const ctx = scope.context;
+      const hr = scope.horizontalPixelRatio, vr = scope.verticalPixelRatio;
+      const w = scope.bitmapSize.width;
+      const x1 = p1.x * hr, y1 = p1.y * vr;
+      let x2 = p2.x * hr, y2 = p2.y * vr;
+      if (x2 !== x1) {
+        const slope = (y2 - y1) / (x2 - x1);
+        const ex = x2 > x1 ? w : 0;
+        y2 = y1 + slope * (ex - x1); x2 = ex;
+      }
+      ctx.save();
+      ctx.strokeStyle = sel ? '#4ADE80' : '#22C55E';
+      ctx.lineWidth = sel ? 2 * hr : 1.5 * hr;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.restore();
+    });
+  }
+}
+
+class RayLinePaneView {
+  private _prim: RayLinePrimitive;
+  private _p1px: { x: number; y: number } | null = null;
+  private _p2px: { x: number; y: number } | null = null;
+  constructor(prim: RayLinePrimitive) { this._prim = prim; }
+  update(): void {
+    const { _chart: chart, _series: series, _p1: p1, _p2: p2 } = this._prim;
+    if (!chart || !series) { this._p1px = null; this._p2px = null; return; }
+    const x1 = chart.timeScale().timeToCoordinate(p1.time as Time);
+    const y1 = series.priceToCoordinate(p1.price);
+    const x2 = chart.timeScale().timeToCoordinate(p2.time as Time);
+    const y2 = series.priceToCoordinate(p2.price);
+    if (x1 == null || y1 == null || x2 == null || y2 == null) { this._p1px = null; this._p2px = null; return; }
+    this._p1px = { x: Number(x1), y: Number(y1) };
+    this._p2px = { x: Number(x2), y: Number(y2) };
+  }
+  renderer(): RayLinePaneRenderer {
+    return new RayLinePaneRenderer(this._p1px, this._p2px, this._prim._selected);
+  }
+}
+
+class RayLinePrimitive implements ISeriesPrimitive<Time> {
+  public _chart: IChartApi | null = null;
+  public _series: ISeriesApi<'Candlestick'> | null = null;
+  public _p1: TrendLinePoint;
+  public _p2: TrendLinePoint;
+  public _selected: boolean = false;
+  private _requestUpdate: (() => void) | null = null;
+  private _view: RayLinePaneView;
+  constructor(p1: TrendLinePoint, p2: TrendLinePoint) {
+    this._p1 = p1; this._p2 = p2; this._view = new RayLinePaneView(this);
+  }
+  attached(params: SeriesAttachedParameter): void {
+    this._chart = params.chart as IChartApi;
+    this._series = params.series as ISeriesApi<'Candlestick'>;
+    this._requestUpdate = params.requestUpdate;
+  }
+  detached(): void { this._chart = null; this._series = null; this._requestUpdate = null; }
+  paneViews(): readonly RayLinePaneView[] { return [this._view]; }
+  updateAllViews(): void { this._view.update(); }
+  setPoints(p1?: TrendLinePoint, p2?: TrendLinePoint): void {
+    if (p1) this._p1 = p1; if (p2) this._p2 = p2; this._requestUpdate?.();
+  }
+  setSelected(s: boolean): void { this._selected = s; this._requestUpdate?.(); }
+}
+
 function pointToSegmentDist(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1, dy = y2 - y1;
   const len2 = dx * dx + dy * dy;
@@ -162,12 +244,11 @@ export default function Home() {
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 
   // Drawing Tool State
-  type TrendLinePoint = { time: number; price: number };
-  type TrendLine = { id: number; p1: TrendLinePoint; p2: TrendLinePoint };
   const [drawingMode, setDrawingMode] = useState<'none' | 'ray'>('none');
   const drawingModeRef = useRef<'none' | 'ray'>('none');
   const [trendLines, setTrendLines] = useState<TrendLine[]>([]);
   const trendLinesRef = useRef<TrendLine[]>([]);
+  const primitiveMapRef = useRef<Map<number, RayLinePrimitive>>(new Map());
   const pendingPointRef = useRef<TrendLinePoint | null>(null);
   const [hasPendingPoint, setHasPendingPoint] = useState(false);
   const trendLineIdRef = useRef(0);
@@ -802,6 +883,8 @@ export default function Home() {
     chartRef.current = chart;
     seriesRef.current = series;
     emaSeriesRef.current = emaSeries;
+    // Re-attach ray line primitives after chart/series recreation
+    primitiveMapRef.current.forEach(prim => series.attachPrimitive(prim));
     drawOpenOrderLines(openOrdersRef.current, activeCoinRef.current);
     drawPositionLine(hlPositionsRef.current, activeCoinRef.current);
     drawWeiOrderLines(weiOrders, activeCoinRef.current, showWeiOrders);
@@ -853,7 +936,12 @@ export default function Home() {
         pendingPointRef.current = null;
         setHasPendingPoint(false);
         trendLineIdRef.current++;
-        setTrendLines(prev => { const next = [...prev, { id: trendLineIdRef.current, p1, p2: { time: timeNum, price } }]; trendLinesRef.current = next; return next; });
+        const newId = trendLineIdRef.current;
+        const newP2 = { time: timeNum, price };
+        const prim = new RayLinePrimitive(p1, newP2);
+        seriesRef.current!.attachPrimitive(prim);
+        primitiveMapRef.current.set(newId, prim);
+        setTrendLines(prev => { const next = [...prev, { id: newId, p1, p2: newP2 }]; trendLinesRef.current = next; return next; });
       }
     });
 
@@ -896,7 +984,7 @@ export default function Home() {
     // Re-render SVG overlay when chart is scrolled or zoomed
     let rafId: number | null = null;
     chart.timeScale().subscribeVisibleLogicalRangeChange(() => {
-      if (rafId !== null) return;
+      if (rafId !== null) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => { setRenderTick(t => t + 1); rafId = null; });
     });
 
@@ -1071,6 +1159,19 @@ export default function Home() {
   // Keep trendLinesRef in sync for hit testing in chart event handlers
   useEffect(() => { trendLinesRef.current = trendLines; }, [trendLines]);
 
+  // Sync primitive selected state when selection changes
+  useEffect(() => {
+    primitiveMapRef.current.forEach((prim, id) => prim.setSelected(id === selectedLineId));
+  }, [selectedLineId]);
+
+  // Sync primitive points when lines are updated (drag)
+  useEffect(() => {
+    trendLines.forEach(l => {
+      const prim = primitiveMapRef.current.get(l.id);
+      if (prim) prim.setPoints(l.p1, l.p2);
+    });
+  }, [trendLines]);
+
   // 魏神挂单：fetch + 定时刷新
   useEffect(() => {
     if (!showWeiOrders) {
@@ -1095,6 +1196,9 @@ export default function Home() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Delete' && e.key !== 'Backspace') return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const prim = primitiveMapRef.current.get(selectedLineId!);
+      if (prim && seriesRef.current) seriesRef.current.detachPrimitive(prim);
+      primitiveMapRef.current.delete(selectedLineId!);
       setTrendLines(prev => { const next = prev.filter(l => l.id !== selectedLineId); trendLinesRef.current = next; return next; });
       setSelectedLineId(null); selectedLineIdRef.current = null;
     };
@@ -1417,6 +1521,9 @@ export default function Home() {
         {selectedLineId !== null && drawingMode === 'none' && (
           <button
             onClick={() => {
+              const prim = primitiveMapRef.current.get(selectedLineId!);
+              if (prim && seriesRef.current) seriesRef.current.detachPrimitive(prim);
+              primitiveMapRef.current.delete(selectedLineId!);
               setTrendLines(prev => { const next = prev.filter(l => l.id !== selectedLineId); trendLinesRef.current = next; return next; });
               setSelectedLineId(null); selectedLineIdRef.current = null;
             }}
@@ -1428,7 +1535,11 @@ export default function Home() {
         )}
         {trendLines.length > 0 && selectedLineId === null && (
           <button
-            onClick={() => { setTrendLines([]); trendLinesRef.current = []; pendingPointRef.current = null; setHasPendingPoint(false); setSelectedLineId(null); }}
+            onClick={() => {
+              primitiveMapRef.current.forEach(prim => seriesRef.current?.detachPrimitive(prim));
+              primitiveMapRef.current.clear();
+              setTrendLines([]); trendLinesRef.current = []; pendingPointRef.current = null; setHasPendingPoint(false); setSelectedLineId(null);
+            }}
             className="ml-1.5 px-2 py-1 text-[10px] text-text-muted hover:text-red-400 border border-border-subtle hover:border-red-400/50 rounded transition-colors"
             title="清除所有画线"
           >
@@ -1496,31 +1607,8 @@ export default function Home() {
           )}
           <div ref={chartContainerRef} className="absolute inset-0" style={{ cursor: drawingMode !== 'none' ? 'crosshair' : undefined }} />
 
-          {/* SVG overlay for ray lines, preview, magnet indicator */}
+          {/* SVG overlay for preview line and magnet indicator (ray lines rendered by canvas primitive) */}
           <svg className="absolute inset-0 pointer-events-none" style={{ zIndex: 10 }} width="100%" height="100%">
-            {trendLines.map(line => {
-              if (!chartRef.current || !seriesRef.current) return null;
-              const c1x = chartRef.current.timeScale().timeToCoordinate(line.p1.time as Time);
-              const c1y = seriesRef.current.priceToCoordinate(line.p1.price);
-              const c2x = chartRef.current.timeScale().timeToCoordinate(line.p2.time as Time);
-              const c2y = seriesRef.current.priceToCoordinate(line.p2.price);
-              if (c1x === null || c1y === null || c2x === null || c2y === null) return null;
-              const x1 = Number(c1x), y1 = Number(c1y);
-              let x2 = Number(c2x), y2 = Number(c2y);
-              const w = chartContainerRef.current?.clientWidth ?? 1000;
-              if (x2 !== x1) {
-                const slope = (y2 - y1) / (x2 - x1);
-                const ex = x2 > x1 ? w : 0;
-                y2 = y1 + slope * (ex - x1); x2 = ex;
-              }
-              const isSelected = line.id === selectedLineId;
-              return (
-                <g key={line.id}>
-                  <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={isSelected ? '#FBBF24' : '#F59E0B'} strokeWidth={isSelected ? 2 : 1.5} />
-                  {isSelected && <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#FBBF24" strokeWidth="10" strokeOpacity="0" />}
-                </g>
-              );
-            })}
             {/* Dashed preview line */}
             {hasPendingPoint && pendingPointRef.current && magnetPoint && chartRef.current && seriesRef.current && (() => {
               const c1x = chartRef.current!.timeScale().timeToCoordinate(pendingPointRef.current!.time as Time);
@@ -1536,14 +1624,14 @@ export default function Home() {
                 const ex = x2 > x1 ? w : 0;
                 y2 = y1 + slope * (ex - x1); x2 = ex;
               }
-              return <line key="preview" x1={x1} y1={y1} x2={x2} y2={y2} stroke="#F59E0B" strokeWidth="1" strokeDasharray="5 3" opacity="0.65" />;
+              return <line key="preview" x1={x1} y1={y1} x2={x2} y2={y2} stroke="#22C55E" strokeWidth="1" strokeDasharray="5 3" opacity="0.65" />;
             })()}
             {/* First point anchor */}
             {hasPendingPoint && pendingPointRef.current && chartRef.current && seriesRef.current && (() => {
               const px = chartRef.current!.timeScale().timeToCoordinate(pendingPointRef.current!.time as Time);
               const py = seriesRef.current!.priceToCoordinate(pendingPointRef.current!.price);
               if (px === null || py === null) return null;
-              return <circle key="anchor" cx={Number(px)} cy={Number(py)} r="4" fill="#F59E0B" fillOpacity="0.3" stroke="#F59E0B" strokeWidth="1.5" />;
+              return <circle key="anchor" cx={Number(px)} cy={Number(py)} r="4" fill="#22C55E" fillOpacity="0.3" stroke="#22C55E" strokeWidth="1.5" />;
             })()}
             {/* Magnet snap cursor */}
             {drawingMode !== 'none' && magnetEnabled && magnetPoint && chartRef.current && seriesRef.current && (() => {
@@ -1581,6 +1669,9 @@ export default function Home() {
                   className="absolute z-20 flex items-center justify-center w-5 h-5 rounded-full bg-red-500 hover:bg-red-400 text-white text-[11px] leading-none cursor-pointer select-none"
                   style={{ left: x1 - 10, top: y1 - 22, pointerEvents: 'auto' }}
                   onClick={() => {
+                    const prim = primitiveMapRef.current.get(selectedLineId!);
+                    if (prim && seriesRef.current) seriesRef.current.detachPrimitive(prim);
+                    primitiveMapRef.current.delete(selectedLineId!);
                     setTrendLines(prev => { const next = prev.filter(l => l.id !== selectedLineId); trendLinesRef.current = next; return next; });
                     setSelectedLineId(null); selectedLineIdRef.current = null;
                   }}
