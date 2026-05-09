@@ -860,6 +860,9 @@ export default function Home() {
         timeVisible: true,
         secondsVisible: false,
       },
+      crosshair: {
+        mode: 0,
+      },
     });
 
     const series = chart.addSeries(CandlestickSeries, {
@@ -2265,6 +2268,7 @@ export default function Home() {
                       <tr className="text-[10px] font-bold uppercase tracking-widest text-text-muted/70 border-b border-border-subtle/50">
                         <th className="text-left py-1.5 pl-1">日期</th>
                         <th className="text-right py-1.5">余额 (USDC)</th>
+                        <th className="text-right py-1.5">Δ</th>
                         <th className="text-right py-1.5">Δ %</th>
                         <th className="py-1.5 pr-1 w-8"></th>
                       </tr>
@@ -2272,6 +2276,7 @@ export default function Home() {
                     <tbody>
                       {[...balanceHistory].reverse().map((entry, idx, arr) => {
                         const prev = arr[idx + 1];
+                        const diff = prev ? entry.value - prev.value : null;
                         const pct = prev ? ((entry.value - prev.value) / prev.value) * 100 : null;
                         const d = new Date(entry.ts);
                         const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -2279,6 +2284,9 @@ export default function Home() {
                           <tr key={entry.ts} className="border-b border-border-subtle/30 hover:bg-bg-card/40 group">
                             <td className="text-left py-2 pl-1 text-text-main">{dateStr}</td>
                             <td className="text-right py-2 text-text-main">{entry.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            <td className={`text-right py-2 ${diff === null ? 'text-text-muted' : diff >= 0 ? 'text-kline-up' : 'text-kline-down'}`}>
+                              {diff === null ? '—' : `${diff >= 0 ? '+' : ''}${diff.toFixed(2)}`}
+                            </td>
                             <td className={`text-right py-2 ${pct === null ? 'text-text-muted' : pct >= 0 ? 'text-kline-up' : 'text-kline-down'}`}>
                               {pct === null ? '—' : `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`}
                             </td>
